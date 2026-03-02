@@ -11,15 +11,8 @@ def fuzz_language_spec(data):
         get_language_spec,
     )
 
-    try:
-        get_language_spec(extension)
-    except Exception:
-        pass
-
-    try:
-        get_language_for_extension(extension)
-    except Exception:
-        pass
+    get_language_spec(extension)
+    get_language_for_extension(extension)
 
 
 if __name__ == "__main__":
