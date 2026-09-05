@@ -400,7 +400,8 @@ def test_dispatch_literal_is_recorded_only_when_it_is_unique(tmp_path: Path) -> 
     # The dict key `{"twice": 1}` is never invoked, so it is not a candidate;
     # the invoked `getattr(obj, "twice")()` is the one site.
     twice = locate_dispatch_literal(tmp_path, "app.py", 1, 7, "twice")
-    assert twice is not None and twice[cs.KEY_LINE] == 7
+    assert twice is not None
+    assert twice[cs.KEY_LINE] == 7
     # A literal outside the span never counts.
     assert locate_dispatch_literal(tmp_path, "app.py", 1, 7, "elsewhere") is None
 
@@ -501,7 +502,8 @@ def test_only_an_invoked_lookup_is_a_dispatch_site(tmp_path: Path) -> None:
         'def run(table):\n    fn = table["target"]\n    return fn()\n'
     )
     bound = locate_dispatch_literal(tmp_path, "bound.py", 1, 3, "target")
-    assert bound is not None and bound[cs.KEY_LINE] == 2
+    assert bound is not None
+    assert bound[cs.KEY_LINE] == 2
     (tmp_path / "direct.py").write_text(
         'def run(obj):\n    return getattr(obj, "target")()\n'
     )
@@ -546,7 +548,8 @@ def test_a_local_rebinding_masks_an_enclosing_computed_name(tmp_path: Path) -> N
         "    return fn() + inner()\n"
     )
     site = locate_dispatch_literal(tmp_path, "app.py", 4, 7, "target")
-    assert site is not None and site[cs.KEY_LINE] == 6
+    assert site is not None
+    assert site[cs.KEY_LINE] == 6
 
 
 def test_a_nested_callers_literal_is_its_own_and_siblings_do_not_leak(
@@ -576,7 +579,8 @@ def test_a_nested_callers_literal_is_its_own_and_siblings_do_not_leak(
     assert (first[cs.KEY_LINE], first[cs.KEY_COL]) == (3, 26)
     # `second`'s dict key is never invoked; its one invoked lookup is the site.
     second = locate_dispatch_literal(tmp_path, "app.py", 5, 7, "target")
-    assert second is not None and second[cs.KEY_LINE] == 7
+    assert second is not None
+    assert second[cs.KEY_LINE] == 7
     # `third` holds none: the siblings' literals must not leak in.
     assert locate_dispatch_literal(tmp_path, "app.py", 9, 10, "target") is None
     # The outer function owns no nested body's literal.

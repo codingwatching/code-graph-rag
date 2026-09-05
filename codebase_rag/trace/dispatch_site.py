@@ -17,6 +17,7 @@ carried the call itself; in either case the edge is marked unlocatable.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from tree_sitter import Node
@@ -182,6 +183,124 @@ def _python_root(file_path: Path) -> Node | None:
     return parser.parse(source).root_node
 
 
+def _outside_span(node: Node, start_line: int, end_line: int) -> bool:
+    return node.end_point[0] + 1 < start_line or node.start_point[0] + 1 > end_line
+
+
+def _assigned_identifier(node: Node) -> str | None:
+    """`name` when `node` is `name = <anything>`."""
+    if node.type != cs.TS_PY_ASSIGNMENT:
+        return None
+    left = node.child_by_field_name(cs.FIELD_LEFT)
+    if left is None or left.type != cs.TS_PY_IDENTIFIER:
+        return None
+    return safe_decode_text(left) or ""
+
+
+@dataclass
+class _BodyScan:
+    """What one walk over a caller's body has found so far.
+
+    The walk itself is in `_dispatch_literals`; this holds the facts it
+    gathers and the two judgements made from them, so each can be read on
+    its own.
+    """
+
+    callee_name: str
+    # Literals whose lookup is invoked on the spot: `getattr(obj, "name")()`.
+    direct: list[Node] = field(default_factory=list)
+    # name -> the literals whose lookups bound it (`fn = table["name"]`).
+    bound_literal: dict[str, list[Node]] = field(default_factory=dict)
+    # Computed names: bound from a non-literal lookup, in the body or in an
+    # enclosing scope; a body assignment of any other kind masks an outer one.
+    stored_outer: set[str] = field(default_factory=set)
+    stored_inner: set[str] = field(default_factory=set)
+    rebound_inner: set[str] = field(default_factory=set)
+    called: set[str] = field(default_factory=set)
+
+    def note_enclosing(self, node: Node) -> None:
+        """A statement of an enclosing scope, visible to the caller."""
+        if (target := _computed_lookup_target(node)) is not None:
+            self.stored_outer.add(target)
+
+    def note_body(self, node: Node) -> bool:
+        """A node of the caller's own body.
+
+        False when the node is a computed dispatch, which could have carried
+        the traced call itself and makes the edge unlocatable.
+        """
+        if _is_computed_dispatch(node):
+            return False
+        if (target := _computed_lookup_target(node)) is not None:
+            self.stored_inner.add(target)
+        elif (rebound := _assigned_identifier(node)) is not None:
+            self.rebound_inner.add(rebound)
+        if (name := _called_identifier(node)) is not None:
+            self.called.add(name)
+        self._note_literal(node)
+        return True
+
+    def _note_literal(self, node: Node) -> None:
+        if _literal_text(node) != self.callee_name:
+            return
+        lookup = _lookup_of(node)
+        if lookup is None:
+            return
+        if _is_invoked(lookup):
+            self.direct.append(node)
+        elif (bound := _bound_name(lookup)) is not None:
+            # Which of several bindings supplied the value at the call
+            # (order, branches, loops) is data flow the scan does not
+            # do; a name bound from a literal lookup MORE than once is
+            # therefore unlocatable rather than guessed at.
+            self.bound_literal.setdefault(bound, []).append(node)
+
+    def sites(self) -> list[Node] | None:
+        """The located sites, or None when the body makes the edge unlocatable."""
+        computed = self.stored_inner | (self.stored_outer - self.rebound_inner)
+        if computed & self.called:
+            return None
+        if any(
+            name in self.called and len(lits) > 1
+            for name, lits in self.bound_literal.items()
+        ):
+            return None
+        return self.direct + [
+            lits[0] for name, lits in self.bound_literal.items() if name in self.called
+        ]
+
+
+def _visit_enclosing(node: Node, scan: _BodyScan) -> bool:
+    """A node outside the caller's span; returns whether to walk its children.
+
+    A sibling scope's body is another callable's; an enclosing scope's
+    statements are visible to the caller, so a computed callable captured
+    from there still counts as stored.
+    """
+    if node.type in _NESTED_SCOPES:
+        return False
+    scan.note_enclosing(node)
+    return True
+
+
+def _visit_body(
+    node: Node, inside_caller: bool, start_line: int, scan: _BodyScan
+) -> tuple[bool, bool] | None:
+    """A node inside the span: (walk children, inside_caller), or None to give up.
+
+    The first definition that begins inside the span is the caller itself;
+    any definition met below it is a nested callable whose literals belong
+    to that callable, not to this edge.
+    """
+    if node.type in _NESTED_SCOPES and node.start_point[0] + 1 >= start_line:
+        if inside_caller:
+            return False, inside_caller
+        inside_caller = True
+    if not scan.note_body(node):
+        return None
+    return True, inside_caller
+
+
 def _dispatch_literals(
     root: Node, start_line: int, end_line: int, callee_name: str
 ) -> list[Node] | None:
@@ -190,61 +309,17 @@ def _dispatch_literals(
     None when the body holds a computed dispatch, which could have carried
     the call itself.
     """
-    # (node, inside_caller): the first definition that begins inside the
-    # span is the caller itself; any definition met below it is a nested
-    # callable whose literals belong to that callable, not to this edge.
+    scan = _BodyScan(callee_name)
     stack: list[tuple[Node, bool]] = [(root, False)]
-    direct: list[Node] = []
-    # name -> the literals whose lookups bound it (`fn = table["name"]`).
-    bound_literal: dict[str, list[Node]] = {}
-    # Computed names: bound from a non-literal lookup, in the body or in an
-    # enclosing scope; a body assignment of any other kind masks an outer one.
-    stored_outer: set[str] = set()
-    stored_inner: set[str] = set()
-    rebound_inner: set[str] = set()
-    called: set[str] = set()
     while stack:
         node, inside_caller = stack.pop()
-        outside = (
-            node.end_point[0] + 1 < start_line or node.start_point[0] + 1 > end_line
-        )
-        if outside:
-            # A sibling scope's body is another callable's; an enclosing
-            # scope's statements are visible to the caller, so a computed
-            # callable captured from there still counts as stored.
-            if node.type in _NESTED_SCOPES:
-                continue
-            if (target := _computed_lookup_target(node)) is not None:
-                stored_outer.add(target)
+        if _outside_span(node, start_line, end_line):
+            descend = _visit_enclosing(node, scan)
+        else:
+            step = _visit_body(node, inside_caller, start_line, scan)
+            if step is None:
+                return None
+            descend, inside_caller = step
+        if descend:
             stack.extend((child, inside_caller) for child in node.children)
-            continue
-        if node.type in _NESTED_SCOPES and node.start_point[0] + 1 >= start_line:
-            if inside_caller:
-                continue
-            inside_caller = True
-        if _is_computed_dispatch(node):
-            return None
-        if (target := _computed_lookup_target(node)) is not None:
-            stored_inner.add(target)
-        elif node.type == cs.TS_PY_ASSIGNMENT:
-            left = node.child_by_field_name(cs.FIELD_LEFT)
-            if left is not None and left.type == cs.TS_PY_IDENTIFIER:
-                rebound_inner.add(safe_decode_text(left) or "")
-        if (name := _called_identifier(node)) is not None:
-            called.add(name)
-        if _literal_text(node) == callee_name and (lookup := _lookup_of(node)):
-            if _is_invoked(lookup):
-                direct.append(node)
-            elif (bound := _bound_name(lookup)) is not None:
-                # Which of several bindings supplied the value at the call
-                # (order, branches, loops) is data flow the scan does not
-                # do; a name bound from a literal lookup MORE than once is
-                # therefore unlocatable rather than guessed at.
-                bound_literal.setdefault(bound, []).append(node)
-        stack.extend((child, inside_caller) for child in node.children)
-    computed = stored_inner | (stored_outer - rebound_inner)
-    if computed & called:
-        return None
-    if any(name in called and len(lits) > 1 for name, lits in bound_literal.items()):
-        return None
-    return direct + [lits[0] for name, lits in bound_literal.items() if name in called]
+    return scan.sites()
