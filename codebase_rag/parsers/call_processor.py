@@ -1886,10 +1886,23 @@ class CallProcessor:
                 # A function expression bound to a variable or table field
                 # (`local f = function()`, `M.f = function()`) has no name field;
                 # the definition pass names it after its assignment target, so
-                # recover the same name here or the whole body is skipped.
-                func_name = lua_utils.extract_assigned_name(
-                    func_node,
-                    accepted_var_types=(cs.TS_DOT_INDEX_EXPRESSION, cs.TS_IDENTIFIER),
+                # recover the same name here or the whole body is skipped. A
+                # table-constructor field value is named by its key path first
+                # (issue #1631), through the SAME helper the definition pass
+                # uses: a returned or passed table has no assignment target at
+                # all, and without this the body's calls were dropped or
+                # credited to the enclosing function (#1631 review).
+                field = lua_utils.field_function_path(func_node)
+                func_name = (
+                    field[0]
+                    if field is not None
+                    else lua_utils.extract_assigned_name(
+                        func_node,
+                        accepted_var_types=(
+                            cs.TS_DOT_INDEX_EXPRESSION,
+                            cs.TS_IDENTIFIER,
+                        ),
+                    )
                 )
             if not func_name:
                 # A nameless JS/TS function expression that a NAMED pass

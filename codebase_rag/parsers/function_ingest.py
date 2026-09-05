@@ -1238,13 +1238,21 @@ class FunctionIngestMixin:
         lang_config: LanguageSpec,
     ) -> FunctionResolution:
         func_name = self._extract_function_name(func_node)
+        # A function expression that is the VALUE of a table-constructor field
+        # (`s = { set = function() end }`) is named by its key, under the table
+        # it is built into: qn `s.set`, name `set`. Before, the enclosing
+        # assignment's left side named it, so every function in the table was
+        # `s` and only an `@line` suffix told them apart (issue #1631).
+        display_name: str | None = None
 
         if (
             not func_name
             and language == cs.SupportedLanguage.LUA
             and func_node.type == cs.TS_LUA_FUNCTION_DEFINITION
         ):
-            func_name = self._extract_lua_assignment_function_name(func_node)
+            func_name, display_name = self._extract_lua_field_function_name(func_node)
+            if not func_name:
+                func_name = self._extract_lua_assignment_function_name(func_node)
 
         is_anonymous = not func_name
         if not func_name:
@@ -1254,7 +1262,9 @@ class FunctionIngestMixin:
             func_node, module_qn, func_name, language, lang_config
         )
         is_exported = export_detection.is_exported(func_node, func_name, language)
-        return FunctionResolution(func_qn, func_name, is_exported, is_anonymous)
+        return FunctionResolution(
+            func_qn, display_name or func_name, is_exported, is_anonymous
+        )
 
     def _build_function_qn(
         self,
@@ -1566,6 +1576,17 @@ class FunctionIngestMixin:
             func_node,
             accepted_var_types=(cs.TS_DOT_INDEX_EXPRESSION, cs.TS_IDENTIFIER),
         )
+
+    def _extract_lua_field_function_name(
+        self, func_node: Node
+    ) -> tuple[str | None, str | None]:
+        """(`table.key` path, `key`) for a table field's function value, else Nones.
+
+        The walk lives in `lua_utils.field_function_path`, shared with the
+        call pass so both name the node identically (#1631 review).
+        """
+        found = lua_utils.field_function_path(func_node)
+        return found if found is not None else (None, None)
 
     def _build_nested_qualified_name(
         self,

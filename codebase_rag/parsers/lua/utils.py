@@ -94,3 +94,73 @@ def extract_pcall_second_identifier(call_node: Node) -> str | None:
                     names.append(decoded)
 
     return names[1] if len(names) >= 2 else None
+
+
+def field_key_name(field: Node) -> str | None:
+    """The key a table-constructor `field` binds: `f` in `f = ...`, `set` in
+    `["set"] = ...`. None for a positional entry or a computed key.
+
+    tree-sitter-lua exposes `k = v` and `[k] = v` alike as `name: identifier`;
+    the opening bracket is what tells a computed key from a literal one
+    (#1631 review), so a bracketed identifier is computed and names nothing.
+    """
+    key = field.child_by_field_name(cs.FIELD_NAME)
+    if key is None:
+        return None
+    bracketed = bool(field.children) and field.children[0].type == cs.LUA_OPEN_BRACKET
+    if key.type == cs.TS_LUA_IDENTIFIER:
+        return None if bracketed else safe_decode_text(key)
+    if key.type in cs.LUA_STRING_TYPES:
+        content = next(
+            (c for c in key.named_children if c.type == cs.TS_LUA_STRING_CONTENT),
+            None,
+        )
+        return safe_decode_text(content) if content is not None else None
+    return None
+
+
+def field_function_path(func_node: Node) -> tuple[str, str] | None:
+    """(`table.key` path, `key`) for a function that is a table field's value.
+
+    Shared by the definition pass, which registers the node under the path,
+    and the call pass, which must recover the same name or the body's calls
+    are skipped or credited to the enclosing function (#1631 review). Nested
+    constructors chain their keys (`M = { sub = { f = ... } }` gives
+    `M.sub.f`); the outermost table takes the name its statement assigns it,
+    through `extract_assigned_name`. A constructor with no assignment (a
+    returned or passed table) names the function by its keys alone.
+
+    None when the function is not a field value, when its key is positional
+    or computed, or when any enclosing constructor sits in a positional or
+    computed field: `{ { run = function() end } }` has no field `run` on the
+    outer list, and inventing `list.run` brings back the `@line` collisions
+    this exists to remove. The caller then falls back to the assignment form.
+    """
+    field = func_node.parent
+    if (
+        field is None
+        or field.type != cs.TS_LUA_FIELD
+        or field.child_by_field_name(cs.FIELD_VALUE) != func_node
+    ):
+        return None
+    key = field_key_name(field)
+    if not key:
+        return None
+    parts = [key]
+    table = field.parent
+    while table is not None and table.type == cs.TS_LUA_TABLE_CONSTRUCTOR:
+        enclosing = table.parent
+        if enclosing is None or enclosing.type != cs.TS_LUA_FIELD:
+            break
+        outer_key = field_key_name(enclosing)
+        if not outer_key:
+            return None
+        parts.insert(0, outer_key)
+        table = enclosing.parent
+    if table is not None:
+        owner = extract_assigned_name(
+            table, accepted_var_types=(cs.TS_DOT_INDEX_EXPRESSION, cs.TS_IDENTIFIER)
+        )
+        if owner:
+            parts.insert(0, owner)
+    return cs.SEPARATOR_DOT.join(parts), key
