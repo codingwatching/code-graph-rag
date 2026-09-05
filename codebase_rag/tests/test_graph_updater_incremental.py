@@ -2139,7 +2139,7 @@ class TestHashCachePublishSymlinkSafety:
     def test_a_stamp_that_cannot_refuse_to_follow_declines_the_publish(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """No descriptor stamp, no `follow_symlinks=False`, and NOT Windows.
+        """No descriptor stamp, no `follow_symlinks=False`, and not the Windows branch.
 
         The previous fallback stamped through the PATH when neither was
         available, and forcing that branch showed a link swapped in after the
@@ -2154,9 +2154,10 @@ class TestHashCachePublishSymlinkSafety:
         member of neither `os.supports_fd` nor `os.supports_follow_symlinks`,
         and it records every call so the test can assert there were none.
         """
-        assert not graph_updater_module._WINDOWS, (
-            "this host takes the Windows branch; see above"
-        )
+        # Forced off rather than asserted: the decline branch is keyed on the
+        # module flag, not on the host, so it can and should run on the
+        # Windows job too (a guard here went red there, #1701 CI).
+        monkeypatch.setattr(graph_updater_module, "_WINDOWS", False)
         stamps: list[tuple] = []
         monkeypatch.setattr(
             graph_updater_module.os, "utime", lambda *a, **k: stamps.append((a, k))
