@@ -43,6 +43,7 @@ EXT_HH = ".hh"
 EXT_IXX = ".ixx"
 EXT_CPPM = ".cppm"
 EXT_CCM = ".ccm"
+EXT_MXX = ".mxx"
 EXT_C = ".c"
 EXT_PHP = ".php"
 EXT_LUA = ".lua"
@@ -81,7 +82,15 @@ CPP_EXTENSIONS = (
     EXT_IXX,
     EXT_CPPM,
     EXT_CCM,
+    EXT_MXX,
 )
+# C++ module interface units, a subset of CPP_EXTENSIONS by construction. This
+# used to be a second literal list in constants/ast_cpp.py and it drifted:
+# `.mxx` was named there and parsed by nothing, so a `.mxx` interface produced
+# no Module and no ModuleInterface and its implementation units resolved
+# against nothing (issue #1727). Spelled from the named constants so the two
+# sets cannot disagree again; test_cpp_module_extension_parity pins it.
+CPP_MODULE_EXTENSIONS = (EXT_IXX, EXT_CPPM, EXT_CCM, EXT_MXX)
 # Translation-unit sources: only these can define a linkable OS entry point;
 # headers and C++ module interface files never are the entry unit.
 C_CPP_SOURCE_EXTENSIONS = (EXT_C, EXT_CPP, EXT_CC, EXT_CXX)

@@ -51,7 +51,6 @@ class CppNodeType(StrEnum):
     TYPE_DESCRIPTOR = "type_descriptor"
 
 
-CPP_MODULE_EXTENSIONS = (".ixx", ".cppm", ".ccm", ".mxx")
 CPP_MODULE_PATH_MARKERS = frozenset({"interfaces", "modules"})
 
 # C++ module declaration prefixes
