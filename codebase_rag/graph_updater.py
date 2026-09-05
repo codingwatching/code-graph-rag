@@ -3073,6 +3073,16 @@ class GraphUpdater:
             if self._single_file is not None and not cache_is_dead
             else {}
         )
+        # Remembered BEFORE the pop: a key forced through re-parse by a
+        # Delombok overlay change was indexed by the previous run, and
+        # popping it from `old_hashes` is what forces the re-hash. It must
+        # not also make the file look NEW to the classification below --
+        # `is_new` skips the delete-before-reingest, so the file's previous
+        # subtree stayed in the graph beside the fresh parse whenever the
+        # graph-backed `preexisting_paths` had nothing to say (issue #1657).
+        forced_reparse_keys = {
+            key for key in self._delombok_stale_keys if key in old_hashes
+        }
         for stale_key in self._delombok_stale_keys:
             old_hashes.pop(stale_key, None)
         is_full_build = (force or not old_hashes) and self._single_file is None
@@ -3209,6 +3219,7 @@ class GraphUpdater:
 
             is_new = (
                 file_key not in old_hashes
+                and file_key not in forced_reparse_keys
                 and preexisting_paths is not None
                 and file_key not in preexisting_paths
             )
