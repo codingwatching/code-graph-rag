@@ -5914,14 +5914,27 @@ class CallProcessor:
         # getter (issue #869).
         if language == cs.SupportedLanguage.DART and registry.is_property(res_qn):
             return
-        for target_qn in registry.variants(res_qn):
-            ensure_rel(
-                source_spec,
-                rel_type,
-                (res_type, cs.KEY_QUALIFIED_NAME, target_qn),
-            )
-            if language == cs.SupportedLanguage.CSHARP:
-                self._record_csharp_cross_module_use(module_qn, target_qn)
+        # The callback's OWN verdict, not the enclosing call's. `resolve_func`
+        # just ran the resolver on `arg_text`, so `last_resolution` describes
+        # this reference; `self._resolution` still describes the call whose
+        # argument it is. Emitting through the stale value labelled a callback
+        # found only by trie fallback as exact, so `dead-code --min-resolution
+        # exact` kept a target it should have dropped (#1543 review). Scoped:
+        # the enclosing call's label is restored on the way out, so the edge
+        # it emits afterwards reads its own verdict back (issue #1526).
+        prev_resolution = self._resolution
+        self._resolution = self._resolver.last_resolution
+        try:
+            for target_qn in registry.variants(res_qn):
+                ensure_rel(
+                    source_spec,
+                    rel_type,
+                    (res_type, cs.KEY_QUALIFIED_NAME, target_qn),
+                )
+                if language == cs.SupportedLanguage.CSHARP:
+                    self._record_csharp_cross_module_use(module_qn, target_qn)
+        finally:
+            self._resolution = prev_resolution
 
     def _record_csharp_cross_module_use(self, module_qn: str, entity_qn: str) -> None:
         # A resolved first-party entity pins the C# namespace import to the

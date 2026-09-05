@@ -159,6 +159,31 @@ def test_a_higher_order_calls_callback_does_not_change_its_own_label(
     assert by_callee["sorted"] == {cs.EdgeResolution.EXACT}
 
 
+def test_a_callback_carries_its_own_verdict_not_the_enclosing_calls(
+    temp_repo: Path, mock_ingestor: MagicMock
+) -> None:
+    # The mirror of the test above. `sorted` is bound through the import
+    # (exact); its `key=lonely` callback is found by name only (heuristic).
+    # The callback edge was emitted through the processor's verdict for the
+    # ENCLOSING call and so carried "exact", which `dead-code --min-resolution
+    # exact` then trusted (#1543 review). Both edges must read their own.
+    (temp_repo / "pkg").mkdir()
+    (temp_repo / "pkg" / "__init__.py").write_text("")
+    (temp_repo / "pkg" / "util.py").write_text(
+        "def sorted(items, key=None):\n    return items\n\n\n"
+        "def lonely(x):\n    return x\n"
+    )
+    (temp_repo / "pkg" / "app.py").write_text(
+        "from pkg.util import sorted\n\n\ndef run(xs):\n    return sorted(xs, key=lonely)\n"
+    )
+    create_and_run_updater(temp_repo, mock_ingestor)
+    by_callee = _resolutions(mock_ingestor, ".pkg.app.run")
+    assert by_callee["sorted"] == {cs.EdgeResolution.EXACT}
+    assert by_callee["lonely"] == {cs.EdgeResolution.HEURISTIC}, (
+        "the callback edge inherited the enclosing call's exact label"
+    )
+
+
 def test_a_call_through_a_dotted_module_import_is_exact(
     temp_repo: Path, mock_ingestor: MagicMock
 ) -> None:
