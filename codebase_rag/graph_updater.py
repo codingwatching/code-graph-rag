@@ -5,6 +5,7 @@ import json
 import os
 import posixpath
 import secrets
+import stat
 import sys
 import time
 from collections import defaultdict
@@ -285,6 +286,12 @@ def _save_hash_cache(cache_path: Path, hashes: FileHashCache) -> None:
 # problem.
 _TEMP_NAME_ATTEMPTS = 8
 
+# Read once at import rather than `os.name` at each use: `pathlib.Path()`
+# itself consults `os.name` at call time, so a test that forced `os.name` to
+# simulate Windows made every `Path()` inside the publish raise
+# NotImplementedError on this host. A module flag can be patched in isolation.
+_WINDOWS = os.name == "nt"
+
 
 def _open_exclusive_temp(cache_path: Path) -> tuple[int, str]:
     """Create a fresh temporary file beside `cache_path`, never following a link.
@@ -442,6 +449,12 @@ def _publish_hash_cache(
         # The check stays because it costs one lstat and turns a swap into a
         # refusal rather than a silent publish.
         current = os.lstat(tmp_path)
+        # A link at the temporary's name is a swap, full stop, on every
+        # platform -- including the one below where the inode comparison
+        # cannot be made. `lstat` never follows, so this reads the entry
+        # itself (#1701 local review).
+        if stat.S_ISLNK(current.st_mode):
+            raise OSError(f"temporary cache path {tmp_path} was replaced by a symlink")
         # Skipped where the identity comparison is not meaningful. On Windows
         # `st_ino` is a file INDEX rather than an inode: it can be 0 on some
         # filesystems, and `fstat` and `lstat` are not guaranteed to agree, so
@@ -455,7 +468,7 @@ def _publish_hash_cache(
         # without any race. The O_EXCL creation and the fsync stay on every
         # platform; only this comparison is conditional.
         identity_is_meaningful = (
-            os.name != "nt" and created.st_ino != 0 and current.st_ino != 0
+            not _WINDOWS and created.st_ino != 0 and current.st_ino != 0
         )
         if identity_is_meaningful and (
             (current.st_ino, current.st_dev) != (created.st_ino, created.st_dev)
@@ -482,22 +495,37 @@ def _publish_hash_cache(
             # here, the stamp lands on the LINK, not on whatever it points at,
             # so no external file's metadata can be touched (#1701 review).
             #
-            # No path-following fallback. A platform whose `os.utime` can
-            # neither take a descriptor nor refuse to follow a link has no
-            # way to stamp this file safely, and stamping through the path
-            # anyway would reopen the exact window this branch exists to
-            # close: a link swapped in after the inode check gets its TARGET
-            # timestamped (#1701 review, measured by forcing this branch).
-            # Declining the publish is the safe error -- the previous cache
-            # stays intact and the next run re-hashes -- where a mis-stamped
-            # publish loses edits. Every platform CI runs on supports one of
-            # the two, so this raise is a guard, not a code path.
-            if os.utime not in os.supports_follow_symlinks:
+            # Windows is the platform this branch exists for, and its
+            # `os.utime` supports NEITHER a descriptor NOR `follow_symlinks`:
+            # `Lib/os.py` adds `utime` to `supports_follow_symlinks` only for
+            # `HAVE_LUTIMES`/`HAVE_UTIMENSAT`, which `PC/pyconfig.h` does not
+            # define, and passing the keyword there raises NotImplementedError
+            # (#1701 local review; an earlier revision refused here and would
+            # have declined every Windows publish). So on Windows the stamp
+            # goes through the PATH, guarded by the `S_ISLNK` refusal above:
+            # a link swapped in before that lstat is refused, and one swapped
+            # in between the lstat and this call needs the same directory
+            # write access that already lets an attacker rewrite the cache
+            # outright, plus the symlink privilege Windows withholds by
+            # default. That is the threat-model argument the inode check
+            # already rests on.
+            #
+            # Any OTHER platform with neither capability has no safe stamp at
+            # all, and stamping through the path there reopens the exact
+            # window this branch closes -- a link swapped in after the check
+            # gets its TARGET timestamped (#1701 review, measured by forcing
+            # the branch). Declining the publish is the safe error: the
+            # previous cache stays and the next run re-hashes, where a
+            # mis-stamped publish loses edits.
+            if _WINDOWS:
+                os.utime(tmp_path, (observed_at, observed_at))
+            elif os.utime in os.supports_follow_symlinks:
+                os.utime(tmp_path, (observed_at, observed_at), follow_symlinks=False)
+            else:
                 raise OSError(
                     "cannot stamp the hash cache without following symlinks "
                     f"on this platform; not publishing {tmp_path}"
                 )
-            os.utime(tmp_path, (observed_at, observed_at), follow_symlinks=False)
             # O_RDWR for the same Windows `_commit()` reason as the first
             # sync: a read-only handle cannot be flushed there.
             sync_flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)

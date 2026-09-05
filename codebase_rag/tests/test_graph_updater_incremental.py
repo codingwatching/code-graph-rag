@@ -2072,23 +2072,91 @@ class TestHashCachePublishSymlinkSafety:
         )
         assert not published, "a publish over a swapped path must refuse"
 
+    def test_the_windows_stamp_lands_and_refuses_a_swapped_link(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Windows-shaped: `os.utime` in NEITHER capability set, `os.name == "nt"`.
+
+        An earlier revision refused the publish whenever `os.utime` could not
+        take a descriptor or `follow_symlinks=False`, on the belief that every
+        CI platform had one of the two. Windows has neither (#1701 local
+        review), so that revision would have declined every stamped publish
+        there and brought back the 39 red tests it set out to fix. On Windows
+        the stamp goes through the path, so this pins both halves: the
+        ordinary publish lands with the stamp applied, and a link swapped in
+        after creation is refused by the `S_ISLNK` check before the path
+        stamp can follow it.
+
+        The module's `_WINDOWS` flag is forced too, because the branch is
+        keyed on it (`os.name` itself cannot be forced: `pathlib.Path()` reads
+        it at call time and would refuse to build paths on this host). On this
+        POSIX host a path-based `os.utime` DOES follow a symlink, which is
+        exactly what makes the swap half of this test meaningful here.
+        """
+        monkeypatch.setattr(
+            os, "supports_fd", frozenset(x for x in os.supports_fd if x is not os.utime)
+        )
+        monkeypatch.setattr(
+            os,
+            "supports_follow_symlinks",
+            frozenset(x for x in os.supports_follow_symlinks if x is not os.utime),
+        )
+        monkeypatch.setattr(graph_updater_module, "_WINDOWS", True)
+        assert os.utime not in os.supports_fd
+        assert os.utime not in os.supports_follow_symlinks
+
+        cache_path = tmp_path / "cache.json"
+        assert graph_updater_module._publish_hash_cache(
+            cache_path, {"a.py": "x"}, 1_000_000.0
+        ), "the Windows-shaped publish was declined"
+        assert int(cache_path.stat().st_mtime) == 1_000_000, (
+            "the Windows-shaped publish landed without its stamp"
+        )
+
+        victim = tmp_path / "victim.txt"
+        victim.write_text("precious\n", encoding="utf-8")
+        before = victim.stat().st_mtime
+        real_open = graph_updater_module._open_exclusive_temp
+
+        def _swap_after_create(path: Path) -> tuple[int, str]:
+            fd, name = real_open(path)
+            os.unlink(name)
+            os.symlink(victim, name)
+            return fd, name
+
+        monkeypatch.setattr(
+            graph_updater_module, "_open_exclusive_temp", _swap_after_create
+        )
+        published = graph_updater_module._publish_hash_cache(
+            tmp_path / "cache2.json", {"a.py": "y"}, 2_000_000.0
+        )
+        assert not published, "a publish over a swapped link must refuse"
+        assert victim.stat().st_mtime == before, (
+            "the Windows path stamp followed a swapped symlink to the victim"
+        )
+        assert not (tmp_path / "cache2.json").exists()
+
     def test_a_stamp_that_cannot_refuse_to_follow_declines_the_publish(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """No descriptor stamp and no `follow_symlinks=False`: do not publish.
+        """No descriptor stamp, no `follow_symlinks=False`, and NOT Windows.
 
         The previous fallback stamped through the PATH when neither was
         available, and forcing that branch showed a link swapped in after the
         inode check getting its target's timestamp rewritten (#1701 review,
-        measured). There is no safe way to stamp on such a platform, so the
-        publish must decline and leave the previous cache untouched, rather
-        than mis-stamp: a declined publish costs one re-hash, a mis-stamped
-        one loses edits.
+        measured). Windows has its own branch (the test above); any other
+        platform in that position has no safe way to stamp, so the publish
+        must decline and leave the previous cache untouched rather than
+        mis-stamp: a declined publish costs one re-hash, a mis-stamped one
+        loses edits.
 
         Replacing `os.utime` is what forces the branch: the replacement is a
         member of neither `os.supports_fd` nor `os.supports_follow_symlinks`,
         and it records every call so the test can assert there were none.
         """
+        assert not graph_updater_module._WINDOWS, (
+            "this host takes the Windows branch; see above"
+        )
         stamps: list[tuple] = []
         monkeypatch.setattr(
             graph_updater_module.os, "utime", lambda *a, **k: stamps.append((a, k))
