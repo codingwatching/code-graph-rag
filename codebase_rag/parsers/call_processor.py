@@ -682,6 +682,28 @@ def _site_scoped[**P, R](fn: Callable[P, R]) -> Callable[P, R]:
     return wrapper
 
 
+def _go_composite_type_name(type_node: Node | None) -> str | None:
+    """The type a Go composite literal constructs, as written: `Error`, `pkg.Error`.
+
+    A `generic_type` (`Box[int]{...}`) constructs its base type. Anything
+    else -- a slice, map, array or struct type literal -- is a container or
+    an anonymous type and has no class to instantiate.
+    """
+    if type_node is None:
+        return None
+    if type_node.type == cs.TS_GO_GENERIC_TYPE:
+        return _go_composite_type_name(type_node.child_by_field_name(cs.FIELD_TYPE))
+    if type_node.type == cs.TS_GO_TYPE_IDENTIFIER:
+        return safe_decode_text(type_node)
+    if type_node.type == cs.TS_GO_QUALIFIED_TYPE:
+        package = type_node.child_by_field_name(cs.FIELD_GO_PACKAGE)
+        name = type_node.child_by_field_name(cs.FIELD_NAME)
+        if package is None or name is None:
+            return None
+        return f"{safe_decode_text(package)}{cs.SEPARATOR_DOT}{safe_decode_text(name)}"
+    return None
+
+
 class _JsFileBindingCollector:
     """Whole-file binding index for the #988 receiver resolution.
 
@@ -1720,6 +1742,13 @@ class CallProcessor:
                     module_qn,
                     None,
                     None,
+                    self._flow_scope_boundaries(queries[language][cs.QUERY_CONFIG]),
+                )
+                # A module-scope `var e = &Error{}` constructs too (issue #1642).
+                self._ingest_go_composite_literal_instantiations(
+                    root_node,
+                    (cs.NodeLabel.MODULE, cs.KEY_QUALIFIED_NAME, module_qn),
+                    module_qn,
                     self._flow_scope_boundaries(queries[language][cs.QUERY_CONFIG]),
                 )
                 # A module-scope Go var bound to a bare function value
@@ -3203,6 +3232,12 @@ class CallProcessor:
                 module_qn,
                 local_var_types,
                 class_context,
+                self._flow_scope_boundaries(queries[language][cs.QUERY_CONFIG]),
+            )
+            self._ingest_go_composite_literal_instantiations(
+                caller_node,
+                caller_spec,
+                module_qn,
                 self._flow_scope_boundaries(queries[language][cs.QUERY_CONFIG]),
             )
         if language == cs.SupportedLanguage.CPP:
@@ -5137,6 +5172,84 @@ class CallProcessor:
         return name.replace(cs.SEPARATOR_DOUBLE_COLON, cs.SEPARATOR_DOT) or None
 
     @_site_scoped
+    def _ingest_go_composite_literal_instantiations(
+        self,
+        caller_node: Node,
+        caller_spec: tuple[str, str, str],
+        module_qn: str,
+        boundary_types: frozenset[str],
+    ) -> None:
+        # `Error{...}` and `&Error{...}` are how Go constructs a struct: there
+        # is no constructor call, so the call pass never saw a construction
+        # and no Go program produced an INSTANTIATES edge (issue #1642). The
+        # composite literal is the construction site. Only a literal whose
+        # `type` names a type is one: a slice, map or array literal builds a
+        # container, and its element literals carry no type of their own.
+        # Revive-only, like the C++ braced-return pass: nothing is emitted
+        # unless the type resolves to a registered first-party Class.
+        registry = self._resolver.function_registry
+        ensure_rel = self._emit_rel
+        stack: list[Node] = list(caller_node.children)
+        while stack:
+            node = stack.pop()
+            if node.type in boundary_types:
+                continue
+            stack.extend(node.children)
+            if node.type != cs.TS_GO_COMPOSITE_LITERAL:
+                continue
+            type_name = _go_composite_type_name(node.child_by_field_name(cs.FIELD_TYPE))
+            if not type_name:
+                continue
+            class_qn = self._go_struct_class(type_name, module_qn)
+            if class_qn is None:
+                continue
+            self._site_node = node
+            for class_variant in registry.variants(class_qn):
+                if registry.get(class_variant) != NodeType.CLASS:
+                    continue
+                ensure_rel(
+                    caller_spec,
+                    cs.RelationshipType.INSTANTIATES,
+                    (cs.NodeLabel.CLASS, cs.KEY_QUALIFIED_NAME, class_variant),
+                )
+
+    def _go_struct_class(self, type_name: str, module_qn: str) -> str | None:
+        """The registered Class a Go composite literal's type names, or None.
+
+        Go types are PACKAGE-scoped: a bare `Name` can only be a type declared
+        in the literal's own package (the files beside it), and `pkg.Name` one
+        declared in the package the import map binds `pkg` to. Types are
+        registered under the FILE that declares them (`proj.m.types.Error`),
+        so the lookup crosses the file segment the source never names.
+
+        Deliberately not `_resolve_class_name`: its last step is a repo-wide
+        search by simple name, which bound `Error{}` in package `m` to a
+        same-named struct in package `a`, or to a Python `class Error`, and
+        dead-code then revived the wrong type while reporting the constructed
+        one dead (#1642 review). The one Class named `Name` directly under a
+        file of the right package is the answer; two candidates, or none,
+        resolve to nothing rather than a guess.
+        """
+        package_alias, _, name = type_name.rpartition(cs.SEPARATOR_DOT)
+        if package_alias:
+            import_map = (
+                self._resolver.import_processor.import_mapping.get(module_qn) or {}
+            )
+            package_qn = import_map.get(package_alias)
+        else:
+            package_qn = module_qn.rpartition(cs.SEPARATOR_DOT)[0]
+        if not package_qn:
+            return None
+        registry = self._resolver.function_registry
+        depth = package_qn.count(cs.SEPARATOR_DOT) + 2
+        candidates = [
+            qn
+            for qn in registry.find_with_prefix_and_suffix(package_qn, name)
+            if registry.get(qn) == NodeType.CLASS
+            and qn.count(cs.SEPARATOR_DOT) == depth
+        ]
+        return candidates[0] if len(candidates) == 1 else None
+
     def _ingest_go_composite_function_references(
         self,
         caller_node: Node,

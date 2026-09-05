@@ -1,0 +1,134 @@
+"""Go composite literals are struct constructions and must emit INSTANTIATES.
+
+`&Error{...}` and `Error{...}` are how a Go program constructs a struct. There
+is no constructor call, so the call pass never saw a construction, and no Go
+program produced an `INSTANTIATES` edge in any syntactic position (issue
+#1642): on gin-gonic/gin every one of the 82 such edges came from the #1641
+method-name collision rather than from a literal. The composite literal is the
+construction site, and this pins the five forms the issue enumerates plus the
+control that a method call is not one.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from codebase_rag import constants as cs
+from codebase_rag.graph_updater import GraphUpdater
+from codebase_rag.parser_loader import load_parsers
+from evals.cgr_graph import _StatefulIngestor
+
+TYPES_GO = "package m\n\ntype Error struct {\n\tMsg string\n}\n\ntype Box[T any] struct {\n\tV T\n}\n"
+SVC_GO = (
+    "package m\n\n"
+    'import "errors"\n\n'
+    'func retPtr() *Error    { return &Error{Msg: "a"} }\n'
+    'func retVal() Error     { return Error{Msg: "b"} }\n'
+    'func assignPtr() *Error { e := &Error{Msg: "c"}; return e }\n'
+    'func assignVal() Error  { e := Error{Msg: "d"}; return e }\n'
+    'func reassign() *Error  { var e *Error; e = &Error{Msg: "e"}; return e }\n'
+    "func generic() Box[int] { return Box[int]{V: 1} }\n"
+    'func container() []Error { return []Error{{Msg: "f"}} }\n\n'
+    "func callsMethod() string {\n"
+    '\terr := errors.New("x")\n'
+    "\treturn err.Error()\n"
+    "}\n"
+)
+OTHER_GO = 'package other\n\nimport "proj/m"\n\nfunc build() *m.Error { return &m.Error{Msg: "g"} }\n'
+
+
+def _index(root: Path) -> _StatefulIngestor:
+    parsers, queries = load_parsers()
+    if cs.SupportedLanguage.GO not in parsers:
+        pytest.skip("go parser not available")
+    store = _StatefulIngestor()
+    GraphUpdater(
+        ingestor=store,
+        repo_path=root,
+        parsers=parsers,
+        queries=queries,
+        project_name="proj",
+    ).run()
+    store.flush_all()
+    return store
+
+
+def _instantiates(store: _StatefulIngestor) -> dict[str, set[str]]:
+    out: dict[str, set[str]] = {}
+    for _sl, src, rel, _tl, dst in store.edges:
+        if rel == cs.RelationshipType.INSTANTIATES.value:
+            out.setdefault(str(src).rsplit(".", 1)[-1], set()).add(str(dst))
+    return out
+
+
+def test_every_struct_construction_form_emits_instantiates(tmp_path: Path) -> None:
+    root = tmp_path / "proj"
+    (root / "m").mkdir(parents=True)
+    (root / "go.mod").write_text("module proj\n\ngo 1.22\n", encoding="utf-8")
+    (root / "m" / "types.go").write_text(TYPES_GO, encoding="utf-8")
+    (root / "m" / "svc.go").write_text(SVC_GO, encoding="utf-8")
+    store = _index(root)
+
+    by_caller = _instantiates(store)
+    error_qn = "proj.m.types.Error"
+    for caller in ("retPtr", "retVal", "assignPtr", "assignVal", "reassign"):
+        assert by_caller.get(caller) == {error_qn}, (
+            f"{caller} constructs Error and emitted {by_caller.get(caller)}"
+        )
+    # A generic instantiation constructs its base type.
+    assert by_caller.get("generic") == {"proj.m.types.Box"}, by_caller.get("generic")
+    # The control: a method call is not a construction (#1641), and a slice
+    # literal's element literals carry no type of their own, so `container`
+    # emits nothing rather than guessing.
+    assert "callsMethod" not in by_caller, by_caller.get("callsMethod")
+    assert "container" not in by_caller, by_caller.get("container")
+
+
+def test_a_qualified_construction_resolves_through_the_import(tmp_path: Path) -> None:
+    root = tmp_path / "proj"
+    (root / "m").mkdir(parents=True)
+    (root / "other").mkdir()
+    (root / "go.mod").write_text("module proj\n\ngo 1.22\n", encoding="utf-8")
+    (root / "m" / "types.go").write_text(TYPES_GO, encoding="utf-8")
+    (root / "other" / "build.go").write_text(OTHER_GO, encoding="utf-8")
+    store = _index(root)
+
+    by_caller = _instantiates(store)
+    assert by_caller.get("build") == {"proj.m.types.Error"}, by_caller.get("build")
+
+
+def test_a_bare_name_binds_only_to_its_own_package(tmp_path: Path) -> None:
+    # Go types are package-scoped. The same struct name in another package,
+    # or a same-named class in another language, must not receive the edge:
+    # the repo-wide simple-name fallback did exactly that, so dead-code
+    # revived the wrong type and reported the constructed one dead (#1642
+    # review). `a` sorts before `m`, which is the order that fallback picked.
+    root = tmp_path / "proj"
+    for pkg in ("a", "m"):
+        (root / pkg).mkdir(parents=True)
+        (root / pkg / "types.go").write_text(
+            f"package {pkg}\n\ntype Error struct {{\n\tMsg string\n}}\n",
+            encoding="utf-8",
+        )
+    (root / "go.mod").write_text("module proj\n\ngo 1.22\n", encoding="utf-8")
+    (root / "m" / "svc.go").write_text(
+        'package m\n\nfunc build() *Error { return &Error{Msg: "x"} }\n',
+        encoding="utf-8",
+    )
+    (root / "config.py").write_text("class Config:\n    pass\n", encoding="utf-8")
+    (root / "m" / "cfg.go").write_text(
+        "package m\n\ntype Config struct{}\n\nfunc cfg() Config { return Config{} }\n",
+        encoding="utf-8",
+    )
+    store = _index(root)
+
+    by_caller = _instantiates(store)
+    assert by_caller.get("build") == {"proj.m.types.Error"}, by_caller.get("build")
+    assert by_caller.get("cfg") == {"proj.m.cfg.Config"}, by_caller.get("cfg")
+    assert not any(
+        "proj.a." in dst or dst == "proj.config.Config"
+        for targets in by_caller.values()
+        for dst in targets
+    ), by_caller
