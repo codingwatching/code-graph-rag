@@ -1246,13 +1246,35 @@ class TestFastPathInSync:
             f"{sorted(indexed_functions)}"
         )
 
-        # And the edit must actually REACH the graph. The assertion above is
-        # satisfied by any reason for declining the fast path, including a
-        # rescan that finds nothing wrong: it pins "did not take the shortcut",
-        # not "did not lose the edit", and those are different claims. Skipping
-        # silently is the dangerous direction here; a redundant re-hash is the
-        # safe error, so the outcome is what has to be asserted. Measured
-        # against the unfixed helper, where the new symbol never appears.
+    def test_a_stamp_that_cannot_be_read_is_not_trusted(self, tmp_path: Path) -> None:
+        """The third answer `_trustworthy_cache_mtime` gives: unreadable.
+
+        Both readers only reach it once `cache_path.is_file()` or the fast
+        path's own checks said the cache exists, so a failing `stat` here is a
+        race with a concurrent publish or a permissions change underneath the
+        run. The honest watermark for a stamp that cannot be read is the same
+        as for one that cannot be trusted: 0.0, so nothing is skipped on its
+        account and the hash comparison decides.
+
+        A file in the path where a directory should be makes `stat` raise
+        `NotADirectoryError`, an `OSError`, without touching permissions,
+        which behave differently for root and on Windows.
+        """
+        not_a_dir = tmp_path / "file.txt"
+        not_a_dir.write_text("x", encoding="utf-8")
+        unreadable = not_a_dir / "cache.json"
+        with pytest.raises(OSError):
+            unreadable.stat()  # fixture guard: the stat must actually fail
+
+        assert graph_updater_module._trustworthy_cache_mtime(unreadable) == 0.0
+
+        # The control: a readable, sane stamp is returned as it is, so the
+        # 0.0 above is the OSError branch and not a helper that always
+        # answers 0.0.
+        readable = tmp_path / "cache.json"
+        readable.write_text("{}", encoding="utf-8")
+        os.utime(readable, (1_000_000.0, 1_000_000.0))
+        assert graph_updater_module._trustworthy_cache_mtime(readable) == 1_000_000.0
 
     def test_a_future_stamp_does_not_skip_an_edit_in_the_hashing_loop(
         self, py_project: Path, mock_ingestor: MagicMock
