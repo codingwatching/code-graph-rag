@@ -404,7 +404,16 @@ def _publish_hash_cache(
         # Reopened with O_NOFOLLOW, so a link swapped in between the close and
         # here cannot redirect the sync; the inode check below still refuses a
         # swapped path before anything is published.
-        sync_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+        #
+        # O_RDWR, not O_RDONLY. On Windows `os.fsync` is `_commit()`, which
+        # calls FlushFileBuffers, and that needs a handle opened for WRITING:
+        # on a read-only handle it fails and the CRT reports it as EBADF.
+        # Every hash-cache publish on that platform died here with "[Errno 9]
+        # Bad file descriptor" and 39 tests went red while ubuntu and macOS,
+        # whose fsync accepts any descriptor, stayed green (#1701 review,
+        # measured in CI: errno=9, failing_path=None, i.e. not an open()).
+        # No O_TRUNC and no write follows, so the contents are untouched.
+        sync_flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
         sync_fd = os.open(tmp_path, sync_flags)
         try:
             os.fsync(sync_fd)
@@ -473,15 +482,25 @@ def _publish_hash_cache(
             # here, the stamp lands on the LINK, not on whatever it points at,
             # so no external file's metadata can be touched (#1701 review).
             #
-            # Guarded because the flag is not universal; where it is
-            # unsupported the threat-model argument still applies -- the swap
-            # needs write permission on this directory, which already allows
-            # rewriting the cache outright.
-            if os.utime in os.supports_follow_symlinks:
-                os.utime(tmp_path, (observed_at, observed_at), follow_symlinks=False)
-            else:
-                os.utime(tmp_path, (observed_at, observed_at))
-            sync_flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0)
+            # No path-following fallback. A platform whose `os.utime` can
+            # neither take a descriptor nor refuse to follow a link has no
+            # way to stamp this file safely, and stamping through the path
+            # anyway would reopen the exact window this branch exists to
+            # close: a link swapped in after the inode check gets its TARGET
+            # timestamped (#1701 review, measured by forcing this branch).
+            # Declining the publish is the safe error -- the previous cache
+            # stays intact and the next run re-hashes -- where a mis-stamped
+            # publish loses edits. Every platform CI runs on supports one of
+            # the two, so this raise is a guard, not a code path.
+            if os.utime not in os.supports_follow_symlinks:
+                raise OSError(
+                    "cannot stamp the hash cache without following symlinks "
+                    f"on this platform; not publishing {tmp_path}"
+                )
+            os.utime(tmp_path, (observed_at, observed_at), follow_symlinks=False)
+            # O_RDWR for the same Windows `_commit()` reason as the first
+            # sync: a read-only handle cannot be flushed there.
+            sync_flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
             sync_fd = os.open(tmp_path, sync_flags)
             try:
                 os.fsync(sync_fd)

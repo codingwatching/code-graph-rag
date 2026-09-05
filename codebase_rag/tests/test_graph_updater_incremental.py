@@ -2071,3 +2071,81 @@ class TestHashCachePublishSymlinkSafety:
             "swapped symlink target's timestamp"
         )
         assert not published, "a publish over a swapped path must refuse"
+
+    def test_a_stamp_that_cannot_refuse_to_follow_declines_the_publish(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """No descriptor stamp and no `follow_symlinks=False`: do not publish.
+
+        The previous fallback stamped through the PATH when neither was
+        available, and forcing that branch showed a link swapped in after the
+        inode check getting its target's timestamp rewritten (#1701 review,
+        measured). There is no safe way to stamp on such a platform, so the
+        publish must decline and leave the previous cache untouched, rather
+        than mis-stamp: a declined publish costs one re-hash, a mis-stamped
+        one loses edits.
+
+        Replacing `os.utime` is what forces the branch: the replacement is a
+        member of neither `os.supports_fd` nor `os.supports_follow_symlinks`,
+        and it records every call so the test can assert there were none.
+        """
+        stamps: list[tuple] = []
+        monkeypatch.setattr(
+            graph_updater_module.os, "utime", lambda *a, **k: stamps.append((a, k))
+        )
+        assert graph_updater_module.os.utime not in os.supports_fd, (
+            "fixture guard: the descriptor branch was not disabled"
+        )
+        assert graph_updater_module.os.utime not in os.supports_follow_symlinks, (
+            "fixture guard: the no-follow branch was not disabled"
+        )
+
+        cache_path = tmp_path / "cache.json"
+        cache_path.write_text('{"kept.py": "old"}', encoding="utf-8")
+        victim = tmp_path / "victim.txt"
+        victim.write_text("precious\n", encoding="utf-8")
+        before = victim.stat().st_mtime
+
+        real_open = graph_updater_module._open_exclusive_temp
+
+        def _swap_after_create(path: Path) -> tuple[int, str]:
+            fd, name = real_open(path)
+            os.unlink(name)
+            os.symlink(victim, name)
+            return fd, name
+
+        # The ordinary path first: with no safe stamp there is no publish.
+        published = graph_updater_module._publish_hash_cache(
+            cache_path, {"a.py": "x"}, 1_000_000.0
+        )
+        assert not published, "a publish that could not stamp safely reported success"
+        assert json.loads(cache_path.read_text(encoding="utf-8")) == {
+            "kept.py": "old"
+        }, "a declined publish must leave the previous cache intact"
+        assert stamps == [], (
+            f"the path-following stamp ran on a platform that cannot refuse "
+            f"to follow: {stamps}"
+        )
+
+        # Then under the swap, which is the case the old fallback got wrong.
+        monkeypatch.setattr(
+            graph_updater_module, "_open_exclusive_temp", _swap_after_create
+        )
+        published = graph_updater_module._publish_hash_cache(
+            tmp_path / "cache2.json", {"a.py": "y"}, 2_000_000.0
+        )
+        assert not published
+        assert victim.stat().st_mtime == before, (
+            "the stamp followed a swapped symlink to the victim"
+        )
+        assert stamps == [], f"utime was called: {stamps}"
+        assert not (tmp_path / "cache2.json").exists(), (
+            "a declined publish left a cache behind"
+        )
+
+        # And a publish that has nothing to stamp still goes through: the
+        # refusal is about the stamp, not about the platform.
+        monkeypatch.setattr(graph_updater_module, "_open_exclusive_temp", real_open)
+        assert graph_updater_module._publish_hash_cache(
+            tmp_path / "cache3.json", {"a.py": "z"}, None
+        ), "an unstamped publish must not be refused"
