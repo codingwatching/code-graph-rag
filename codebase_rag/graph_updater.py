@@ -2633,6 +2633,29 @@ class GraphUpdater:
         if qns_to_remove:
             logger.debug(ls.REMOVING_QNS, count=len(qns_to_remove))
 
+        # The Go return-type map is keyed by the same function qns and was the
+        # one registry this sweep did not reach (issue #1668): a deleted Go
+        # file's entries persisted, and because the package index is filled
+        # with `setdefault`, a same-name sibling parsed later lost to the stale
+        # one. Same ownership filter as the registry sweep, so a qn another
+        # file still owns survives; the map's own keys are checked as well as
+        # `qns_to_remove` because an entry can outlive its registry row.
+        go_return_types = self.factory.type_inference.go_function_return_types
+        stale_go_qns = [
+            qn
+            for qn in go_return_types
+            if qn in qns_to_remove
+            or (
+                any(
+                    qn.startswith(f"{prefix}.") or qn == prefix
+                    for prefix in module_qn_prefixes
+                )
+                and qn not in foreign_qns
+            )
+        ]
+        if stale_go_qns:
+            self.factory.type_inference.drop_go_return_types(stale_go_qns)
+
         for simple_name, qn_set in self.simple_name_lookup.items():
             original_count = len(qn_set)
             new_qn_set = qn_set - qns_to_remove
