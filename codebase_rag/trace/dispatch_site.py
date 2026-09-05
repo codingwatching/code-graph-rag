@@ -209,8 +209,11 @@ class _BodyScan:
     callee_name: str
     # Literals whose lookup is invoked on the spot: `getattr(obj, "name")()`.
     direct: list[Node] = field(default_factory=list)
-    # name -> the literals whose lookups bound it (`fn = table["name"]`).
+    # name -> the literals whose lookups bound it (`fn = table["name"]`), and
+    # the earliest line such a binding appears at: a binding below the first
+    # call of the name cannot have supplied that call's value either.
     bound_literal: dict[str, list[Node]] = field(default_factory=dict)
+    bound_literal_line: dict[str, int] = field(default_factory=dict)
     # Computed names: bound from a non-literal lookup, in the body or in an
     # enclosing scope; a body assignment of any other kind masks an outer one,
     # but only for calls AFTER it. `rebound_inner` and `called` therefore
@@ -265,6 +268,7 @@ class _BodyScan:
             # do; a name bound from a literal lookup MORE than once is
             # therefore unlocatable rather than guessed at.
             self.bound_literal.setdefault(bound, []).append(node)
+            self._note_first(self.bound_literal_line, bound, node.start_point[0] + 1)
 
     def sites(self) -> list[Node] | None:
         """The located sites, or None when the body makes the edge unlocatable."""
@@ -282,6 +286,15 @@ class _BodyScan:
         if any(
             name in self.called and len(lits) > 1
             for name, lits in self.bound_literal.items()
+        ):
+            return None
+        # A literal binding below the name's first call did not supply that
+        # call: whatever did (an enclosing binding, or nothing) is what the
+        # traced edge went through, so the later literal is not its site
+        # (#1543 review).
+        if any(
+            name in self.called and line > self.called[name]
+            for name, line in self.bound_literal_line.items()
         ):
             return None
         return self.direct + [

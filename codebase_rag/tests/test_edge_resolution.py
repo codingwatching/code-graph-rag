@@ -619,6 +619,44 @@ def test_a_rebinding_after_the_call_does_not_mask_the_enclosing_computed_name(
     assert locate_dispatch_literal(tmp_path, "local.py", 4, 8, "target") is None
 
 
+def test_a_literal_binding_after_the_call_is_not_its_site(tmp_path: Path) -> None:
+    from codebase_rag.trace.dispatch_site import locate_dispatch_literal
+
+    # `fn()` runs on the value inherited from the ENCLOSING literal lookup
+    # (outside the caller's span, so not a candidate); the literal lookup
+    # that rebinds `fn` inside the body comes AFTER the call, so it cannot be
+    # the site of the call the trace observed either. Recording it would
+    # point the dynamic edge's source at an expression that never ran for
+    # that call (#1543 review). An enclosing COMPUTED binding is the case the
+    # rebinding test above already covers; this one has no computed binding
+    # anywhere, so only the ordering rule can refuse it.
+    (tmp_path / "app.py").write_text(
+        "def run(registry):\n"
+        '    fn = registry["target"]\n'
+        "\n"
+        "    def inner():\n"
+        "        nonlocal fn\n"
+        "        fn()\n"
+        '        fn = registry["target"]\n'
+        "        return fn()\n"
+        "\n"
+        "    return inner()\n"
+    )
+    assert locate_dispatch_literal(tmp_path, "app.py", 4, 8, "target") is None
+    # The control: the same binding ABOVE the call is the site.
+    (tmp_path / "before.py").write_text(
+        "def run(registry, key):\n"
+        "    def inner():\n"
+        '        fn = registry["target"]\n'
+        "        return fn()\n"
+        "\n"
+        "    return inner()\n"
+    )
+    site = locate_dispatch_literal(tmp_path, "before.py", 2, 4, "target")
+    assert site is not None
+    assert site[cs.KEY_LINE] == 3
+
+
 def test_a_nested_callers_literal_is_its_own_and_siblings_do_not_leak(
     tmp_path: Path,
 ) -> None:
