@@ -212,11 +212,15 @@ class _BodyScan:
     # name -> the literals whose lookups bound it (`fn = table["name"]`).
     bound_literal: dict[str, list[Node]] = field(default_factory=dict)
     # Computed names: bound from a non-literal lookup, in the body or in an
-    # enclosing scope; a body assignment of any other kind masks an outer one.
+    # enclosing scope; a body assignment of any other kind masks an outer one,
+    # but only for calls AFTER it. `rebound_inner` and `called` therefore
+    # record the earliest line each name is rebound and called at: a rebind
+    # below the first call cannot have supplied that call's value, so it must
+    # not hide the enclosing computed binding that did (#1543 review).
     stored_outer: set[str] = field(default_factory=set)
     stored_inner: set[str] = field(default_factory=set)
-    rebound_inner: set[str] = field(default_factory=set)
-    called: set[str] = field(default_factory=set)
+    rebound_inner: dict[str, int] = field(default_factory=dict)
+    called: dict[str, int] = field(default_factory=dict)
 
     def note_enclosing(self, node: Node) -> None:
         """A statement of an enclosing scope, visible to the caller."""
@@ -231,14 +235,21 @@ class _BodyScan:
         """
         if _is_computed_dispatch(node):
             return False
+        line = node.start_point[0] + 1
         if (target := _computed_lookup_target(node)) is not None:
             self.stored_inner.add(target)
         elif (rebound := _assigned_identifier(node)) is not None:
-            self.rebound_inner.add(rebound)
+            self._note_first(self.rebound_inner, rebound, line)
         if (name := _called_identifier(node)) is not None:
-            self.called.add(name)
+            self._note_first(self.called, name, line)
         self._note_literal(node)
         return True
+
+    @staticmethod
+    def _note_first(seen: dict[str, int], name: str, line: int) -> None:
+        # The walk is a stack, not source order, so keep the smallest line.
+        if line < seen.get(name, line + 1):
+            seen[name] = line
 
     def _note_literal(self, node: Node) -> None:
         if _literal_text(node) != self.callee_name:
@@ -257,8 +268,16 @@ class _BodyScan:
 
     def sites(self) -> list[Node] | None:
         """The located sites, or None when the body makes the edge unlocatable."""
-        computed = self.stored_inner | (self.stored_outer - self.rebound_inner)
-        if computed & self.called:
+        # A rebinding masks an enclosing computed name only if it precedes
+        # every call of that name; one after the first call leaves that call
+        # bound to the outer computed value, so the edge stays unlocatable.
+        masking = {
+            name
+            for name, line in self.rebound_inner.items()
+            if name not in self.called or line < self.called[name]
+        }
+        computed = self.stored_inner | (self.stored_outer - masking)
+        if computed & self.called.keys():
             return None
         if any(
             name in self.called and len(lits) > 1

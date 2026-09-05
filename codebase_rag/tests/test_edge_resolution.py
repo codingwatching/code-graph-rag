@@ -577,6 +577,48 @@ def test_a_local_rebinding_masks_an_enclosing_computed_name(tmp_path: Path) -> N
     assert site[cs.KEY_LINE] == 6
 
 
+def test_a_rebinding_after_the_call_does_not_mask_the_enclosing_computed_name(
+    tmp_path: Path,
+) -> None:
+    from codebase_rag.trace.dispatch_site import locate_dispatch_literal
+
+    # The mirror of the test above: the nested caller invokes `fn` while it
+    # still holds the enclosing computed `registry[key]`, and only THEN
+    # rebinds it. The rebinding cannot have supplied the earlier call's value,
+    # so the computed dispatch is live at that call and the body's one
+    # literal is not a trustworthy site (#1543 review: the rebinding set was
+    # gathered over the whole body regardless of order, so the later
+    # `fn = ...` hid the enclosing binding and the literal was recorded).
+    (tmp_path / "app.py").write_text(
+        "def run(registry, key, obj):\n"
+        "    fn = registry[key]\n"
+        "\n"
+        "    def inner():\n"
+        "        nonlocal fn\n"
+        "        fn()\n"
+        '        getattr(obj, "target")()\n'
+        "        fn = lambda: 0\n"
+        "        return fn()\n"
+        "\n"
+        "    return inner()\n"
+    )
+    assert locate_dispatch_literal(tmp_path, "app.py", 4, 9, "target") is None
+    # And the same shape with a plain local rebinding after the call.
+    (tmp_path / "local.py").write_text(
+        "def run(registry, key, obj):\n"
+        "    fn = registry[key]\n"
+        "\n"
+        "    def inner():\n"
+        "        fn()\n"
+        '        getattr(obj, "target")()\n'
+        "        fn = lambda: 0\n"
+        "        return fn()\n"
+        "\n"
+        "    return inner()\n"
+    )
+    assert locate_dispatch_literal(tmp_path, "local.py", 4, 8, "target") is None
+
+
 def test_a_nested_callers_literal_is_its_own_and_siblings_do_not_leak(
     tmp_path: Path,
 ) -> None:
