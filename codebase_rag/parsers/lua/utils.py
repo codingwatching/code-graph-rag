@@ -136,12 +136,8 @@ def field_function_path(func_node: Node) -> tuple[str, str] | None:
     outer list, and inventing `list.run` brings back the `@line` collisions
     this exists to remove. The caller then falls back to the assignment form.
     """
-    field = func_node.parent
-    if (
-        field is None
-        or field.type != cs.TS_LUA_FIELD
-        or field.child_by_field_name(cs.FIELD_VALUE) != func_node
-    ):
+    field = _field_valued_by(func_node)
+    if field is None:
         return None
     key = field_key_name(field)
     if not key:
@@ -192,9 +188,25 @@ def is_field_value(func_node: Node) -> bool:
     is anonymous, and falling back named `{ [k] = function() end }` after the
     table it sits in (#1750 review).
     """
-    field = func_node.parent
-    return (
-        field is not None
-        and field.type == cs.TS_LUA_FIELD
-        and field.child_by_field_name(cs.FIELD_VALUE) == func_node
-    )
+    return _field_valued_by(func_node) is not None
+
+
+def _field_valued_by(func_node: Node) -> Node | None:
+    """The table field whose value is `func_node`, seen through parentheses.
+
+    `f = (function() end)` parses as field > parenthesized_expression >
+    function_definition, so the field's value is the parentheses and not
+    the function; without unwrapping, the function was not a field value
+    and fell back to the assignment's name (CodeRabbit, #1750).
+    """
+    value: Node = func_node
+    parent = value.parent
+    while parent is not None and parent.type == cs.TS_PARENTHESIZED_EXPRESSION:
+        value, parent = parent, parent.parent
+    if (
+        parent is None
+        or parent.type != cs.TS_LUA_FIELD
+        or parent.child_by_field_name(cs.FIELD_VALUE) != value
+    ):
+        return None
+    return parent

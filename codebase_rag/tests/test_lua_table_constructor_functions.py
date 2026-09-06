@@ -85,6 +85,7 @@ REVIEW_LUA = (
     "local handlers = { { run = function() helper() end }, { run = function() end } }\n"
     "local result = register({ on_event = function() helper2() end })\n"
     "local function outer() return { f = function() helper() end } end\n"
+    "local p = { f = (function() helper() end) }\n"
     "return { setup = function() helper() end }\n"
 )
 
@@ -147,10 +148,13 @@ def test_keys_that_name_nothing_fall_back_and_named_fields_keep_their_calls(
         ("proj.mod.setup", "setup"),
         ("proj.mod.on_event", "on_event"),
         ("proj.mod.outer.f", "f"),
+        # A parenthesised function value is still the field's value
+        # (CodeRabbit, #1750).
+        ("proj.mod.p.f", "f"),
     ):
         assert functions.get(qn) == name, (qn, functions)
 
     calls = _calls(root)
-    for caller in ("proj.mod.setup", "proj.mod.outer.f"):
+    for caller in ("proj.mod.setup", "proj.mod.outer.f", "proj.mod.p.f"):
         assert (caller, "proj.mod.helper") in calls, (caller, sorted(calls))
     assert ("proj.mod.on_event", "proj.mod.helper2") in calls, sorted(calls)
