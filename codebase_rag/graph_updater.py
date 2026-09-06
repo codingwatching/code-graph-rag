@@ -2731,17 +2731,19 @@ class GraphUpdater:
         # re-parsed by this event, so the entry goes and the next parse of
         # the survivor re-records it. A missing type is a degraded answer; a
         # stale one is a wrong answer (#1752 review).
-        # The map is keyed by the NATURAL qn even when the registry filed the
-        # definition as a `@line` duplicate (the second declaration of one
-        # receiver method writes `...A.Clone`, its span record says
-        # `...A.Clone@3`), so ownership is compared on the natural form.
+        # Ownership is compared on the NATURAL qn on both sides: the map is
+        # usually keyed by it even when the registry filed the definition as
+        # a `@line` duplicate (the second declaration of one receiver method
+        # writes `...A.Clone`, its span record says `...A.Clone@3`), and a
+        # few writers (deferred Rust functions, duplicate C++ out-of-class
+        # methods) key the map by the `@line` name itself (#1752 review).
         method_return_types = self.factory.type_inference.method_return_types
         owned_natural = {_natural_qn(qn) for qn in owned_qns}
         stale_method_qns = [
             qn
             for qn in method_return_types
             if qn in qns_to_remove
-            or qn in owned_natural
+            or _natural_qn(qn) in owned_natural
             or (
                 qn not in foreign_qns
                 and any(

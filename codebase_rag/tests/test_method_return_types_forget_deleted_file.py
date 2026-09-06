@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+from codebase_rag import constants as cs
 from codebase_rag.graph_updater import GraphUpdater
 from codebase_rag.parser_loader import load_parsers
 from codebase_rag.tests.conftest import _MockIngestor
@@ -181,3 +182,26 @@ def test_a_qn_shared_with_a_survivor_is_forgotten_rather_than_left_stale(
     assert "proj.pkg.types.A.Clone" not in recorded, (
         f"the deleted definition's return type survives under the survivor: {recorded}"
     )
+
+
+def test_an_entry_keyed_by_its_duplicate_name_is_forgotten_too(temp_repo: Path) -> None:
+    """Some writers key the map by the registry's `@line` name itself.
+
+    Deferred Rust functions and duplicate C++ out-of-class methods record
+    their return type under the `@line` name, so the ownership comparison
+    normalises the map key as well as the span record (#1752 review). The
+    Go fixture plants such a key for the deleted file's method.
+    """
+    root = temp_repo / "proj"
+    updater = _project(root)
+    recorded = updater.factory.type_inference.method_return_types
+    planted = f"proj.pkg.types.A.Clone{cs.DUP_QN_MARKER}3"
+    recorded[planted] = "A"
+
+    (root / "pkg" / "methods.go").unlink()
+    updater.remove_file_from_state(root / "pkg" / "methods.go")
+
+    assert planted not in recorded, (
+        f"an entry keyed by the deleted method's duplicate name survived: {recorded}"
+    )
+    assert recorded.get("proj.pkg.types.B.Twin") == "B", recorded
