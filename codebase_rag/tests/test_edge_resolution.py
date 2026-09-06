@@ -459,7 +459,10 @@ def test_dispatch_literal_is_recorded_only_when_it_is_unique(tmp_path: Path) -> 
     assert locate_dispatch_literal(tmp_path, "app.py", 1, 7, "elsewhere") is None
 
 
-@pytest.mark.parametrize("stored", ["fn = registry[name]", "fn = getattr(obj, name)"])
+@pytest.mark.parametrize(
+    "stored",
+    ["fn = registry[name]", "fn = getattr(obj, name)", "fn = (registry[name])"],
+)
 def test_a_stored_computed_lookup_called_later_makes_the_edge_unlocatable(
     tmp_path: Path, stored: str
 ) -> None:

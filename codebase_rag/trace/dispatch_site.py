@@ -106,7 +106,9 @@ def _computed_lookup_target(node: Node) -> str | None:
     if node.type != cs.TS_PY_ASSIGNMENT:
         return None
     left = node.child_by_field_name(cs.FIELD_LEFT)
-    right = node.child_by_field_name(cs.FIELD_RIGHT)
+    # `fn = (registry[name])` stores the same lookup as the bare form
+    # (#1543 review).
+    right = _unparenthesised(node.child_by_field_name(cs.FIELD_RIGHT))
     if left is None or right is None or left.type != cs.TS_PY_IDENTIFIER:
         return None
     if right.type == cs.TS_PY_SUBSCRIPT:
