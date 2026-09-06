@@ -3077,6 +3077,14 @@ class GraphUpdater:
         # already reprocessed. Single-file runs never commit it either.
         self._delombok_state_candidate = current
 
+    def _single_target_vanished(self, filepath: Path) -> bool:
+        """Whether `filepath` is this run's single target and is now gone."""
+        return (
+            self._single_file is not None
+            and filepath == self._single_file
+            and not filepath.exists()
+        )
+
     def _collect_eligible_files(self) -> list[tuple[Path, str]]:
         if self._single_file is not None:
             if not should_skip_path(
@@ -3281,6 +3289,9 @@ class GraphUpdater:
                 try:
                     file_mtime = filepath.stat().st_mtime
                 except OSError:
+                    if self._single_target_vanished(filepath):
+                        single_gone_key = file_key
+                        continue
                     unreadable_count += 1
                     unreadable_keys.add(file_key)
                     continue
@@ -3292,6 +3303,13 @@ class GraphUpdater:
 
             hashed = _hash_file_with_bytes(filepath)
             if hashed is None:
+                # The same deletion, one step later: a target that passed the
+                # existence check and was removed before its stat or read is
+                # gone all the same, and the unreadable path would keep its
+                # state and cache entry (#1755 review).
+                if self._single_target_vanished(filepath):
+                    single_gone_key = file_key
+                    continue
                 unreadable_count += 1
                 unreadable_keys.add(file_key)
                 continue

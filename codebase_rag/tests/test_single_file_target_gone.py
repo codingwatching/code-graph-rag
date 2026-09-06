@@ -14,10 +14,12 @@ deleted file.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from codebase_rag import constants as cs
+from codebase_rag import graph_updater as graph_updater_module
 from codebase_rag.graph_updater import GraphUpdater
 from codebase_rag.parser_loader import load_parsers
 from evals.cgr_graph import _StatefulIngestor
@@ -116,3 +118,52 @@ def test_a_single_file_target_that_still_exists_is_indexed_as_before(
     ], "a present single-file target was treated as deleted"
     assert "module_a.py" in _cache(temp_repo)
     assert "proj.module_a.func_a" in updater.function_registry
+
+
+def test_a_target_deleted_during_hashing_is_a_deletion_too(temp_repo: Path) -> None:
+    # The race the first fix left open (#1755 review): the target passes the
+    # existence check and is removed before its bytes are read. That read
+    # returning nothing used to count as an unreadable file, which kept the
+    # registry entry and republished the cache with the target in it.
+    (temp_repo / "module_a.py").write_text("def func_a():\n    pass\n")
+    (temp_repo / "module_b.py").write_text("def func_b():\n    pass\n")
+    store = _StatefulIngestor()
+    _create_graph_updater(temp_repo, store).run()
+    store.flush_all()
+    before = _cache(temp_repo)
+
+    target = temp_repo / "module_a.py"
+    # Later than the cache, so the run reaches the read rather than the
+    # in-sync skip.
+    cache_mtime = (temp_repo / cs.HASH_CACHE_FILENAME).stat().st_mtime
+    os.utime(target, (cache_mtime + 2, cache_mtime + 2))
+    updater = _create_graph_updater(target, store)
+    real_hash = graph_updater_module._hash_file_with_bytes
+
+    def _vanish_then_hash(path: Path):
+        # The updater hashes its RESOLVED target (`/private/var/...` for a
+        # `/var/...` temp dir on macOS), so compare resolved paths.
+        if path.resolve() == target.resolve() and target.exists():
+            target.unlink()
+        return real_hash(path)
+
+    with (
+        patch.object(graph_updater_module, "_hash_file_with_bytes", _vanish_then_hash),
+        patch.object(store, "execute_write", wraps=store.execute_write) as spy,
+    ):
+        updater.run()
+    store.flush_all()
+
+    assert not target.exists(), "fixture guard: the hash hook did not remove the target"
+    deletes = {
+        (query, params.get(cs.KEY_PATH))
+        for query, params in _writes(spy)
+        if query in (cs.CYPHER_DELETE_MODULE, cs.CYPHER_DELETE_FILE)
+    }
+    assert (cs.CYPHER_DELETE_MODULE, "module_a.py") in deletes, deletes
+    assert not any(
+        qn.startswith("proj.module_a") for qn in updater.function_registry.keys()
+    ), "the target deleted during hashing kept its definitions"
+    after = _cache(temp_repo)
+    assert "module_a.py" not in after, f"the cache still lists the target: {after}"
+    assert after.get("module_b.py") == before["module_b.py"]
