@@ -281,3 +281,41 @@ def test_a_local_type_is_visible_from_its_declaration_to_its_block_end(
         package_qn,
         f"{package_qn}{cs.DUP_QN_MARKER}14",
     }, by_caller
+
+
+def test_a_local_type_scope_respects_columns_and_case_clauses(tmp_path: Path) -> None:
+    # Two more shapes of the same rule (#1747 review). On one line, a literal
+    # BEFORE the declaration names the package type, which needs column
+    # order and not just rows. A `case` clause's body is an implicit block,
+    # so a type declared under `case 0:` is invisible to `default:`.
+    root = tmp_path / "proj"
+    (root / "m").mkdir(parents=True)
+    (root / "go.mod").write_text("module proj\n\ngo 1.22\n", encoding="utf-8")
+    (root / "m" / "one.go").write_text(
+        "package m\n\n"
+        "type Local struct{}\n\n"
+        "func sameLine() any { x := Local{}; type Local struct{ V int }; "
+        "y := Local{V: 1}; return []any{x, y} }\n\n"
+        "func inSwitch(n int) any {\n"
+        "\tswitch n {\n"
+        "\tcase 0:\n"
+        "\t\ttype Local struct{ V int }\n"
+        "\t\treturn Local{V: 1}\n"
+        "\tdefault:\n"
+        "\t\treturn Local{}\n"
+        "\t}\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    store = _index(root)
+
+    by_caller = _instantiates(store)
+    package_qn = "proj.m.one.Local"
+    assert by_caller.get("sameLine") == {
+        package_qn,
+        f"{package_qn}{cs.DUP_QN_MARKER}5",
+    }, by_caller
+    assert by_caller.get("inSwitch") == {
+        package_qn,
+        f"{package_qn}{cs.DUP_QN_MARKER}10",
+    }, by_caller

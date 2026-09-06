@@ -689,6 +689,19 @@ _GO_SCOPE_TYPES = frozenset(
         cs.TS_GO_FUNC_LITERAL,
     }
 )
+# Each is an implicit block for a declaration inside it: a `case` clause's
+# body is its own scope without braces, so a type declared under `case 0:`
+# is invisible to the `default:` arm (#1747 review).
+_GO_BLOCK_TYPES = frozenset(
+    {
+        cs.TS_GO_BLOCK,
+        cs.TS_GO_EXPRESSION_CASE,
+        cs.TS_GO_TYPE_CASE,
+        cs.TS_GO_COMMUNICATION_CASE,
+        cs.TS_GO_DEFAULT_CASE,
+    }
+)
+_Point = tuple[int, int]
 
 
 def _go_composite_type_name(type_node: Node | None) -> str | None:
@@ -5354,7 +5367,10 @@ class CallProcessor:
         if len(declarations) != len(variants):
             return variants
         by_line = {line: span for line, span in declarations}
-        row = literal.start_point.row
+        # A point, not a row: `x := Local{}; type Local struct{}` on one line
+        # puts the literal BEFORE the declaration, and rows alone attributed
+        # it to the later local type (#1747 review).
+        point: _Point = (literal.start_point.row, literal.start_point.column)
         package_level: list[str] = []
         local: list[str] = []
         for index, variant in enumerate(variants):
@@ -5371,7 +5387,7 @@ class CallProcessor:
                 span = declarations[0][1]
             if span is None:
                 package_level.append(variant)
-            elif span[0] <= row <= span[1]:
+            elif span[0] <= point <= span[1]:
                 local.append(variant)
         if len(local) == 1:
             return local
@@ -5381,39 +5397,42 @@ class CallProcessor:
 
     def _go_type_declaration_scopes(
         self, module_qn: str, name: str
-    ) -> list[tuple[int, tuple[int, int] | None]]:
-        """(1-based line, visible row span or None) per `type name` declaration.
+    ) -> list[tuple[int, tuple[_Point, _Point] | None]]:
+        """(1-based line, visible span or None) per `type name` declaration.
 
         The span of a function-local declaration runs from the declaration's
-        own row to the last row of its innermost enclosing block (a bare
-        `{ }` block, a loop or branch body, or the function body itself),
-        which is where Go makes it visible. None marks a package-level
-        declaration, visible everywhere in the file. In document order,
-        which is the order the definition pass registered them in, so the
-        first is the natural qn and the rest are variants named by their
-        line.
+        own (row, column) to the end of its innermost enclosing block: a bare
+        `{ }` block, a loop or branch body, a `case` clause's implicit body,
+        or the function body itself, which is where Go makes it visible.
+        None marks a package-level declaration, visible everywhere in the
+        file. In document order, which is the order the definition pass
+        registered them in, so the first is the natural qn and the rest are
+        variants named by their line.
         """
         type_inference = self._resolver.type_inference
         file_path = type_inference.module_qn_to_file_path.get(module_qn)
         if file_path is None or not (entry := type_inference.ast_cache.load(file_path)):
             return []
         root_node, _ = entry
-        found: list[tuple[int, tuple[int, int] | None]] = []
-        # The second item is the last row of the innermost block, or None
+        found: list[tuple[int, tuple[_Point, _Point] | None]] = []
+        # The second item is the end point of the innermost block, or None
         # above every function.
-        stack: list[tuple[Node, int | None]] = [(root_node, None)]
+        stack: list[tuple[Node, _Point | None]] = [(root_node, None)]
         while stack:
             node, block_end = stack.pop()
             if node.type in _GO_SCOPE_TYPES or (
-                block_end is not None and node.type == cs.TS_GO_BLOCK
+                block_end is not None and node.type in _GO_BLOCK_TYPES
             ):
-                block_end = node.end_point.row
+                block_end = (node.end_point.row, node.end_point.column)
             if node.type == cs.TS_GO_TYPE_SPEC:
                 spec_name = node.child_by_field_name(cs.FIELD_NAME)
                 if spec_name is not None and safe_decode_text(spec_name) == name:
-                    row = node.start_point.row
+                    start: _Point = (node.start_point.row, node.start_point.column)
                     found.append(
-                        (row + 1, None if block_end is None else (row, block_end))
+                        (
+                            start[0] + 1,
+                            None if block_end is None else (start, block_end),
+                        )
                     )
             stack.extend((child, block_end) for child in node.children)
         found.sort(key=lambda item: item[0])
