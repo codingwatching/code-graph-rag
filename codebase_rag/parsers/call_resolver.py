@@ -484,6 +484,14 @@ class CallResolver:
         # `from m import instance` and `import m` both land in the map, and only
         # the second is a namespace.
         full = base if not rest else f"{base}{cs.SEPARATOR_DOT}{rest}"
+        # A CLASS receiver constructs only its own nested classes: the member
+        # lookup that produced `resolved_qn` falls back to a search by the
+        # bare member name, which can land on a same-named class nested in
+        # another type, and an alias receiver has no precise member path at
+        # all (CodeRabbit, #1759). A module receiver keeps the namespace
+        # check.
+        if self.function_registry.get(full) == cs.NodeLabel.CLASS:
+            return self._class_is_nested_in(resolved_qn, full)
         return self._import_target_is_a_namespace(full)
 
     def _receiver_owns_nested_class(

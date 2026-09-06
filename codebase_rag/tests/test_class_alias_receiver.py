@@ -156,3 +156,28 @@ def test_an_attribute_target_in_an_unpacking_does_not_rebind_the_alias(
     assert by_caller.get("proj.mod_b.via_alias") == {"proj.mod_a.Outer.Inner"}, (
         by_caller
     )
+
+
+def test_an_alias_never_constructs_a_rival_nested_class(tmp_path: Path) -> None:
+    # `Alias.Inner()` resolves its member by bare name, so with a same-named
+    # `Inner` nested in another class the lookup may land on the rival. A
+    # class receiver may only construct a class nested in itself (CodeRabbit,
+    # #1759): the edge, if any, is to `Outer.Inner`, never `Other.Inner`.
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "mod_a.py").write_text(
+        "class Other:\n    class Inner:\n        pass\n\n\n" + MOD_A,
+        encoding="utf-8",
+    )
+    (root / "mod_b.py").write_text(
+        "from mod_a import Outer\n\nAlias = Outer\n\n\n"
+        "def via_alias():\n    return Alias.Inner(3)\n\n\n"
+        "def via_class():\n    return Outer.Inner(3)\n",
+        encoding="utf-8",
+    )
+
+    by_caller = _instantiates(root)
+    for caller in ("proj.mod_b.via_alias", "proj.mod_b.via_class"):
+        targets = by_caller.get(caller, set())
+        assert "proj.mod_a.Other.Inner" not in targets, (caller, by_caller)
+        assert targets <= {"proj.mod_a.Outer.Inner"}, (caller, by_caller)
