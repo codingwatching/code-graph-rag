@@ -334,3 +334,27 @@ public record R2(int x) : Gen<int>(x);
     inherits = _pairs(mock_ingestor, "INHERITS")
     assert _has(inherits, "N.R", "N.Base"), inherits
     assert _has(inherits, "N.R2", "N.Gen"), inherits
+
+
+def test_nested_type_of_a_generic_outer_keeps_its_qualified_base(
+    csharp_project: Path, mock_ingestor: MagicMock
+) -> None:
+    # `Outer<int>.Inner` is one qualified_name whose text carries the outer
+    # type's arguments; stripping from the first `<` dropped `.Inner` and
+    # bound the base to `Outer` (CodeRabbit, #1770).
+    (csharp_project / "Nested.cs").write_text(
+        """
+namespace N;
+public class Outer<T>
+{
+    public class Inner { }
+}
+public class D : Outer<int>.Inner { }
+""",
+        encoding="utf-8",
+    )
+    run_updater(csharp_project, mock_ingestor, skip_if_missing=SKIP)
+
+    inherits = _pairs(mock_ingestor, "INHERITS")
+    assert _has(inherits, "N.D", "N.Outer.Inner"), inherits
+    assert not _has(inherits, "N.D", "N.Outer"), inherits

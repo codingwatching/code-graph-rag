@@ -61,10 +61,28 @@ def _csharp_qualified_base_name(node: Node) -> str | None:
     # A qualified generic base (`System.Collections.Generic.List<int>`)
     # is one qualified_name whose text carries the type arguments; strip
     # them so the written name matches the registered, generic-free qn.
+    # Every argument span goes, not the tail from the first `<`: a nested
+    # type of a generic outer (`Outer<int>.Inner`) keeps its `.Inner`
+    # (CodeRabbit, #1770).
     if not node.text:
         return None
     text = safe_decode_text(node)
-    return text.split(cs.CHAR_ANGLE_OPEN, 1)[0] if text else None
+    return _strip_type_arguments(text) if text else None
+
+
+def _strip_type_arguments(text: str) -> str:
+    """`Outer<int>.Inner<Map<K, V>>` -> `Outer.Inner`: drop every balanced
+    angle-bracket span, however deep."""
+    kept: list[str] = []
+    depth = 0
+    for char in text:
+        if char == cs.CHAR_ANGLE_OPEN:
+            depth += 1
+        elif char == cs.CHAR_ANGLE_CLOSE:
+            depth = max(depth - 1, 0)
+        elif depth == 0:
+            kept.append(char)
+    return "".join(kept)
 
 
 def _csharp_looks_like_interface(simple_name: str) -> bool:
