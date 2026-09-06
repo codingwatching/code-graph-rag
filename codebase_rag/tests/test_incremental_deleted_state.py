@@ -469,9 +469,18 @@ def test_rehydration_readds_an_interface_held_only_by_the_graph(
     if cs.SupportedLanguage.CPP not in first.parsers:
         pytest.skip("cpp parser not available")
     first.run(force=True)
-    assert [
+    clean_edges = [
         edge for edge in store.edges if edge[2] == cs.RelationshipType.IMPLEMENTS.value
-    ], "fixture guard: the clean index did not resolve impl.cpp against M"
+    ]
+    assert len(clean_edges) == 1, (
+        f"fixture guard: the clean index did not resolve impl.cpp against M: {clean_edges}"
+    )
+    impl_label, impl_qn, _rel, iface_label, iface_qn = clean_edges[0]
+    assert (str(iface_label), str(iface_qn)) == (
+        cs.NodeLabel.MODULE_INTERFACE.value,
+        "proj.M",
+    ), clean_edges
+    assert str(impl_label) == cs.NodeLabel.MODULE_IMPLEMENTATION.value, clean_edges
 
     second = first if reuse_updater else _updater(store, root, cs.SupportedLanguage.CPP)
     (root / "impl.cpp").write_text(
@@ -492,13 +501,24 @@ def test_rehydration_readds_an_interface_held_only_by_the_graph(
         "rehydration did not re-add the interface the graph holds: "
         f"{sorted(dp.cpp_module_interfaces)}"
     )
+    # The same endpoints the clean index produced, not just any IMPLEMENTS
+    # (CodeRabbit, #1754): the implementation unit as source, `proj.M` as the
+    # ModuleInterface target.
     implements_now = [
-        call
+        (
+            str(call.args[0][0]),
+            str(call.args[0][2]),
+            str(call.args[2][0]),
+            str(call.args[2][2]),
+        )
         for call in spy.call_args_list
         if str(call.args[1]) == cs.RelationshipType.IMPLEMENTS.value
     ]
-    assert implements_now, (
-        "the edited implementation unit lost its IMPLEMENTS edge on the incremental run"
+    assert implements_now == [
+        (str(impl_label), str(impl_qn), str(iface_label), str(iface_qn))
+    ], (
+        "the edited implementation unit lost its IMPLEMENTS edge on the "
+        f"incremental run, or emitted it between other endpoints: {implements_now}"
     )
 
 
