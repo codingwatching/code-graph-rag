@@ -16,7 +16,7 @@ from .py import resolve_class_name
 from .rs import utils as rs_utils
 from .semantic_call_join import call_site_key, declared_location
 from .type_inference import TypeInferenceEngine
-from .utils import follow_reexports
+from .utils import follow_reexports, safe_decode_text
 
 _SEPARATOR_PATTERN = re.compile(r"[.:]|::")
 _SEARCH_NAME_CACHE: dict[str, str] = {}
@@ -510,7 +510,79 @@ class CallResolver:
         if class_qn and self.function_registry.get(class_qn) == cs.NodeLabel.CLASS:
             return class_qn
         import_map = self.import_processor.import_mapping.get(module_qn) or {}
-        return import_map.get(head)
+        if (imported := import_map.get(head)) is not None:
+            if self.function_registry.get(
+                imported
+            ) == cs.NodeLabel.CLASS or self._import_target_is_a_namespace(imported):
+                return imported
+            # An imported name that is neither a class nor a namespace may be
+            # an alias defined in the module it was imported FROM
+            # (`from mod_b import Alias` where mod_b says `Alias = Outer`);
+            # look it up there (#1672 local review).
+            owner_qn, _, alias_name = imported.rpartition(cs.SEPARATOR_DOT)
+            return self._class_bound_by_module_alias(alias_name, owner_qn)
+        # A module-level `Alias = Outer` names the class it binds: it is an
+        # assignment rather than an import, so it is in neither the class
+        # lookup nor the import map, and `Alias.Inner()` lost the INSTANTIATES
+        # edge `Outer.Inner()` keeps (issue #1672). Only a right-hand side
+        # that itself resolves to a Class counts; `inst = make()` still holds
+        # a value.
+        return self._class_bound_by_module_alias(head, module_qn)
+
+    def _class_bound_by_module_alias(self, name: str, module_qn: str) -> str | None:
+        if not name or not module_qn:
+            return None
+        target = self._module_level_alias_target(name, module_qn)
+        if target is None:
+            return None
+        alias_qn = self._resolve_class_name(target, module_qn)
+        if alias_qn and self.function_registry.get(alias_qn) == cs.NodeLabel.CLASS:
+            return alias_qn
+        return None
+
+    def _module_level_alias_target(self, name: str, module_qn: str) -> str | None:
+        """The name a module-level Python `name = Other` binds, or None.
+
+        Reads the module's cached AST rather than a recorded map: the
+        definition pass records no module-level assignments, and the
+        dotted spelling (`Alias = pkg.Outer`) is kept so the class lookup
+        can follow the import it names. The LAST module-level binding
+        decides: `Alias = Outer` followed by `Alias = make()` holds a value
+        by the time anything runs, so it names nothing (#1672 local review).
+        """
+        file_path = self.type_inference.module_qn_to_file_path.get(module_qn)
+        if file_path is None:
+            return None
+        entry = self.type_inference.ast_cache.load(file_path)
+        # A guard, not a contract: resolver tests drive this with a stub cache
+        # whose `load` answers something that is not a (root, language) pair.
+        if not isinstance(entry, tuple) or len(entry) != 2:
+            return None
+        root_node = entry[0]
+        if not isinstance(root_node, Node):
+            return None
+        bound: str | None = None
+        for child in root_node.children:
+            if child.type != cs.TS_PY_EXPRESSION_STATEMENT or not child.children:
+                continue
+            assignment = child.children[0]
+            if assignment.type != cs.TS_PY_ASSIGNMENT:
+                continue
+            left = assignment.child_by_field_name(cs.TS_FIELD_LEFT)
+            if (
+                left is None
+                or left.type != cs.TS_PY_IDENTIFIER
+                or safe_decode_text(left) != name
+            ):
+                continue
+            right = assignment.child_by_field_name(cs.TS_FIELD_RIGHT)
+            bound = (
+                safe_decode_text(right)
+                if right is not None
+                and right.type in (cs.TS_PY_IDENTIFIER, cs.TS_PY_ATTRIBUTE)
+                else None
+            )
+        return bound
 
     def _class_is_nested_in(self, class_qn: str, owner_qn: str) -> bool:
         """Whether `class_qn` is declared inside `owner_qn` or one of its bases.
