@@ -156,6 +156,8 @@ class CallResolver:
         "interface_implementers",
         "_interface_impl_cache",
         "_simple_resolution_cache",
+        "last_resolution",
+        "_resolution_labels",
         "_wildcard_cache",
         "_protocol_impl_cache",
         "_field_bindings",
@@ -210,6 +212,10 @@ class CallResolver:
         self._simple_resolution_cache: dict[
             tuple[str, str], tuple[str, str] | None
         ] = {}
+        # The branch that produced the last answer (issue #1526), memoised
+        # beside the cache so a hit reports the same confidence as the miss.
+        self.last_resolution: str = cs.EdgeResolution.EXACT
+        self._resolution_labels: dict[tuple[str, str], str] = {}
         self._wildcard_cache: dict[int, list[tuple[str, str]]] = {}
         self._protocol_impl_cache: dict[str, str] | None = None
         self._field_bindings: dict[tuple[str, str], set[str]] = {}
@@ -417,6 +423,7 @@ class CallResolver:
         language: cs.SupportedLanguage | None = None,
         call_point: int | None = None,
     ) -> tuple[str, str] | None:
+        self.last_resolution = cs.EdgeResolution.EXACT
         return self._reject_class_via_value_receiver(
             self._redirect_protocol_method(
                 self._resolve_function_call(
@@ -1217,6 +1224,9 @@ class CallResolver:
         if use_cache:
             cache_key = (call_name, module_qn)
             if cache_key in self._simple_resolution_cache:
+                self.last_resolution = self._resolution_labels.get(
+                    cache_key, cs.EdgeResolution.EXACT
+                )
                 return self._simple_resolution_cache[cache_key]
 
         if result := self._try_resolve_iife(call_name, module_qn):
@@ -1272,7 +1282,7 @@ class CallResolver:
             )
             if decided:
                 if use_cache:
-                    self._simple_resolution_cache[cache_key] = prefixed
+                    self._remember(cache_key, prefixed)
                 return prefixed
 
         # Rust name resolution prefers items defined in the module itself: a
@@ -1286,19 +1296,19 @@ class CallResolver:
             result := self._try_resolve_same_module(call_name, module_qn, call_point)
         ):
             if use_cache:
-                self._simple_resolution_cache[cache_key] = result
+                self._remember(cache_key, result)
             return result
 
         if result := self._try_resolve_via_imports(
             call_name, module_qn, local_var_types, language
         ):
             if use_cache:
-                self._simple_resolution_cache[cache_key] = result
+                self._remember(cache_key, result)
             return result
 
         if result := self._try_resolve_same_module(call_name, module_qn, call_point):
             if use_cache:
-                self._simple_resolution_cache[cache_key] = result
+                self._remember(cache_key, result)
             return result
 
         # A Rust `module::item` call names its function through the module
@@ -1318,7 +1328,7 @@ class CallResolver:
             )
             if decided:
                 if use_cache:
-                    self._simple_resolution_cache[cache_key] = result
+                    self._remember(cache_key, result)
                 return result
 
         if class_context and (
@@ -1336,7 +1346,7 @@ class CallResolver:
             call_name, module_qn
         ):
             if use_cache:
-                self._simple_resolution_cache[cache_key] = None
+                self._remember(cache_key, None)
             return None
 
         # A dotted call on an import whose target still holds a raw
@@ -1347,7 +1357,7 @@ class CallResolver:
         # fallback rebind it to an unrelated first-party function.
         if self._is_external_path_import(call_name, module_qn):
             if use_cache:
-                self._simple_resolution_cache[cache_key] = None
+                self._remember(cache_key, None)
             return None
 
         # A member call `obj.method` whose receiver has a KNOWN inferred type that is
@@ -1358,7 +1368,7 @@ class CallResolver:
         # receivers keep the fallback (their type is unknown, not known-external).
         if self._receiver_type_is_external(call_name, module_qn, local_var_types):
             if use_cache:
-                self._simple_resolution_cache[cache_key] = None
+                self._remember(cache_key, None)
             return None
 
         # A JS/TS/Dart member call on an UNTYPED receiver (`view.render(...)`
@@ -1380,7 +1390,7 @@ class CallResolver:
                 return result
             result = self._resolve_js_member_call_unique(call_name, module_qn)
             if use_cache:
-                self._simple_resolution_cache[cache_key] = result
+                self._remember(cache_key, result)
             return result
 
         # A bare name imported from an unrepresentable #[path] module is
@@ -1393,13 +1403,19 @@ class CallResolver:
             and self._rust_name_maps_unresolvable(call_name, module_qn, caller_qn)
         ):
             if use_cache:
-                self._simple_resolution_cache[cache_key] = None
+                self._remember(cache_key, None)
             return None
 
         result = self._try_resolve_via_trie(call_name, module_qn, language, call_point)
         if use_cache:
-            self._simple_resolution_cache[cache_key] = result
+            self._remember(cache_key, result)
         return result
+
+    def _remember(
+        self, cache_key: tuple[str, str], result: tuple[str, str] | None
+    ) -> None:
+        self._simple_resolution_cache[cache_key] = result
+        self._resolution_labels[cache_key] = self.last_resolution
 
     def _rust_name_maps_unresolvable(
         self, call_name: str, module_qn: str, caller_qn: str | None
@@ -1939,6 +1955,7 @@ class CallResolver:
             return None
         for _, imported_qn in wildcards:
             if result := self._try_wildcard_qns(call_name, imported_qn):
+                self.last_resolution = cs.EdgeResolution.HEURISTIC
                 return result
         return None
 
@@ -2533,6 +2550,7 @@ class CallResolver:
                 ),
             )
         logger.debug(ls.CALL_TRIE_FALLBACK, call_name=call_name, qn=best_candidate_qn)
+        self.last_resolution = cs.EdgeResolution.HEURISTIC
         return self.function_registry[best_candidate_qn], best_candidate_qn
 
     def _resolve_two_part_call(
@@ -2586,7 +2604,10 @@ class CallResolver:
             and object_name not in cs.JS_MODULE_RECEIVERS
         ):
             return None
-        return self._try_resolve_module_method(method_name, call_name, module_qn)
+        resolved = self._try_resolve_module_method(method_name, call_name, module_qn)
+        if resolved is not None:
+            self.last_resolution = cs.EdgeResolution.HEURISTIC
+        return resolved
 
     def _try_resolve_static_type_method(
         self, object_name: str, method_name: str, call_name: str, module_qn: str
@@ -2718,6 +2739,8 @@ class CallResolver:
         if not candidates:
             return None
         member_qn = min(candidates)
+        if len(candidates) > 1:
+            self.last_resolution = cs.EdgeResolution.HEURISTIC
         logger.debug(ls.CALL_PACKAGE_MEMBER, member=member_name, qn=member_qn)
         return self.function_registry[member_qn], member_qn
 
@@ -2828,6 +2851,12 @@ class CallResolver:
                     method_qn=method_qn,
                 )
                 return self.function_registry[method_qn], method_qn
+            # `import pkg.util` is recorded as `pkg -> proj.pkg.util`, so a
+            # call spelled `pkg.util.helper` repeats the module's tail; the
+            # import names the module exactly, so the call is exact too and
+            # must not fall to the name-only trie (issue #1526).
+            if module_qn_hit := self._import_tail_qualified(class_qn, parts, call_name):
+                return module_qn_hit
 
         if local_var_types and class_name in local_var_types:
             var_type = local_var_types[class_name]
@@ -2860,6 +2889,22 @@ class CallResolver:
         return self._resolve_field_hop_method(
             parts, call_name, import_map, module_qn, local_var_types
         )
+
+    def _import_tail_qualified(
+        self, class_qn: str, parts: list[str], call_name: str
+    ) -> tuple[str, str] | None:
+        """`parts` re-spells the tail of the imported module `class_qn`."""
+        for cut in range(len(parts) - 1, 1, -1):
+            tail = cs.SEPARATOR_DOT.join(parts[:cut])
+            if class_qn != tail and not class_qn.endswith(cs.SEPARATOR_DOT + tail):
+                continue
+            method_qn = f"{class_qn}.{cs.SEPARATOR_DOT.join(parts[cut:])}"
+            if method_qn in self.function_registry:
+                logger.debug(
+                    ls.CALL_IMPORT_QUALIFIED, call_name=call_name, method_qn=method_qn
+                )
+                return self.function_registry[method_qn], method_qn
+        return None
 
     def _resolve_field_hop_method(
         self,
