@@ -85,10 +85,17 @@ def _php_fold(name: str) -> str:
 
 
 def _binds_identifier(target: Node, name: str) -> bool:
-    """Whether an unpacking target names `name` at any depth."""
+    """Whether an unpacking target binds the bare name `name` at any depth.
+
+    Only bare identifiers bind a module-level name: `holder.Alias, x = ...`
+    assigns an attribute and `table[Alias], x = ...` a subscript, so those
+    subtrees are not descended into (#1759 review).
+    """
     stack = [target]
     while stack:
         node = stack.pop()
+        if node.type in (cs.TS_PY_ATTRIBUTE, cs.TS_PY_SUBSCRIPT):
+            continue
         if node.type == cs.TS_PY_IDENTIFIER and safe_decode_text(node) == name:
             return True
         stack.extend(node.named_children)

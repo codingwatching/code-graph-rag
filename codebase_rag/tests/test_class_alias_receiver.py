@@ -134,3 +134,25 @@ def test_an_alias_rebound_by_unpacking_no_longer_constructs(tmp_path: Path) -> N
 
     by_caller = _instantiates(root)
     assert "proj.mod_b.via_alias" not in by_caller, by_caller
+
+
+def test_an_attribute_target_in_an_unpacking_does_not_rebind_the_alias(
+    tmp_path: Path,
+) -> None:
+    # `holder.Alias, other = make_pair()` assigns an attribute, not the
+    # module-level name, so the alias keeps constructing (#1759 review).
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "mod_a.py").write_text(MOD_A, encoding="utf-8")
+    (root / "mod_b.py").write_text(
+        "from mod_a import Outer, make_pair\n\n"
+        "class Holder:\n    pass\n\n\nholder = Holder()\n"
+        "Alias = Outer\nholder.Alias, other = make_pair()\n\n\n"
+        "def via_alias():\n    return Alias.Inner(3)\n",
+        encoding="utf-8",
+    )
+
+    by_caller = _instantiates(root)
+    assert by_caller.get("proj.mod_b.via_alias") == {"proj.mod_a.Outer.Inner"}, (
+        by_caller
+    )
