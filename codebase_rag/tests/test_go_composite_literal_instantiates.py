@@ -173,5 +173,67 @@ def test_a_dot_imported_struct_and_a_shadowing_local_type_resolve(
         "pkgLevel"
     )
     targets = by_caller.get("withLocal")
-    assert targets is not None and len(targets) == 1, targets
+    assert targets is not None, by_caller
+    assert len(targets) == 1, targets
     assert next(iter(targets)).startswith("proj.m.inner."), targets
+
+
+def test_a_local_type_shadows_the_package_one_within_its_function(
+    tmp_path: Path,
+) -> None:
+    # Both declarations in ONE file register under one qn, the local one as
+    # a `@line` variant, and every literal fanned out to both. Go scoping:
+    # the literal inside `withLocal` names the local type, the one in
+    # `pkgLevel` the package-level type (CodeRabbit, #1747).
+    root = tmp_path / "proj"
+    (root / "m").mkdir(parents=True)
+    (root / "go.mod").write_text("module proj\n\ngo 1.22\n", encoding="utf-8")
+    (root / "m" / "one.go").write_text(
+        "package m\n\n"
+        "type Local struct{}\n\n"
+        "func pkgLevel() Local { return Local{} }\n\n"
+        "func withLocal() any {\n"
+        "\ttype Local struct{ V int }\n"
+        "\treturn Local{V: 1}\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    store = _index(root)
+
+    by_caller = _instantiates(store)
+    assert by_caller.get("pkgLevel") == {"proj.m.one.Local"}, by_caller
+    assert by_caller.get("withLocal") == {f"proj.m.one.Local{cs.DUP_QN_MARKER}8"}, (
+        by_caller
+    )
+
+
+def test_a_test_packages_type_is_invisible_to_production_code(tmp_path: Path) -> None:
+    # `package m_test` shares the directory with `package m` and is a
+    # different package; any `_test.go` is compiled only under `go test`.
+    # A production literal in a THIRD file saw both `Error` declarations and
+    # the ambiguity rule emitted nothing (CodeRabbit, #1747). The external
+    # test's own literal binds to its own `Error`; an internal test file
+    # (`package m` in `_test.go`) sees the production type.
+    root = tmp_path / "proj"
+    (root / "m").mkdir(parents=True)
+    (root / "go.mod").write_text("module proj\n\ngo 1.22\n", encoding="utf-8")
+    (root / "m" / "types.go").write_text(TYPES_GO, encoding="utf-8")
+    (root / "m" / "svc.go").write_text(
+        'package m\n\nfunc build() Error { return Error{Msg: "a"} }\n',
+        encoding="utf-8",
+    )
+    (root / "m" / "m_test.go").write_text(
+        "package m_test\n\ntype Error struct{ Other int }\n\n"
+        "func external() Error { return Error{Other: 1} }\n",
+        encoding="utf-8",
+    )
+    (root / "m" / "internal_test.go").write_text(
+        'package m\n\nfunc internal() Error { return Error{Msg: "t"} }\n',
+        encoding="utf-8",
+    )
+    store = _index(root)
+
+    by_caller = _instantiates(store)
+    assert by_caller.get("build") == {"proj.m.types.Error"}, by_caller
+    assert by_caller.get("external") == {"proj.m.m_test.Error"}, by_caller
+    assert by_caller.get("internal") == {"proj.m.types.Error"}, by_caller

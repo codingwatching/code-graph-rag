@@ -682,6 +682,15 @@ def _site_scoped[**P, R](fn: Callable[P, R]) -> Callable[P, R]:
     return wrapper
 
 
+_GO_SCOPE_TYPES = frozenset(
+    {
+        cs.TS_GO_FUNCTION_DECLARATION,
+        cs.TS_GO_METHOD_DECLARATION,
+        cs.TS_GO_FUNC_LITERAL,
+    }
+)
+
+
 def _go_composite_type_name(type_node: Node | None) -> str | None:
     """The type a Go composite literal constructs, as written: `Error`, `pkg.Error`.
 
@@ -5204,7 +5213,9 @@ class CallProcessor:
             if class_qn is None:
                 continue
             self._site_node = node
-            for class_variant in registry.variants(class_qn):
+            for class_variant in self._go_visible_class_variants(
+                class_qn, module_qn, node
+            ):
                 if registry.get(class_variant) != NodeType.CLASS:
                     continue
                 ensure_rel(
@@ -5270,6 +5281,9 @@ class CallProcessor:
             for qn in registry.find_with_prefix_and_suffix(package_qn, name)
             if registry.get(qn) == NodeType.CLASS
             and qn.count(cs.SEPARATOR_DOT) == depth
+            and self._go_declaration_is_visible(
+                qn.rpartition(cs.SEPARATOR_DOT)[0], package_qn, module_qn
+            )
         ]
         if len(candidates) > 1:
             own = [
@@ -5279,6 +5293,119 @@ class CallProcessor:
             ]
             candidates = own if own else candidates
         return candidates[0] if len(candidates) == 1 else None
+
+    def _go_declaration_is_visible(
+        self, declaring_qn: str, package_qn: str, module_qn: str
+    ) -> bool:
+        """Whether a type declared in `declaring_qn` is in scope for `module_qn`.
+
+        A directory is not a package: `package m_test` files sit beside
+        `package m` files and are a DIFFERENT package, and any `_test.go` is
+        compiled only under `go test`. Without this filter a production
+        `Error{}` in a third file of the package saw both `types.Error` and a
+        same-named `Error` from `m_test.go`, and the ambiguity rule emitted
+        nothing (CodeRabbit, #1747). Same rules as `_go_package_receiver_qn`:
+        a test file is visible only to a test requester of the same package,
+        and within the requester's own directory the `package` clauses must
+        agree. A lookup through an import is into ANOTHER package, whose
+        clause the requester does not share, so only the test rule applies.
+        """
+        declaring_path = self.module_qn_to_file_path.get(declaring_qn)
+        if declaring_path is None:
+            return True
+        requester = self.module_qn_to_file_path.get(module_qn)
+        requester_is_test = requester is not None and requester.stem.endswith(
+            cs.GO_TEST_FILE_SUFFIX
+        )
+        own_package = package_qn == module_qn.rpartition(cs.SEPARATOR_DOT)[0]
+        if declaring_path.stem.endswith(cs.GO_TEST_FILE_SUFFIX) and not (
+            requester_is_test and own_package
+        ):
+            return False
+        if not own_package:
+            return True
+        requester_package = self._go_package_names.get(module_qn)
+        return (
+            requester_package is None
+            or self._go_package_names.get(declaring_qn) == requester_package
+        )
+
+    def _go_visible_class_variants(
+        self, class_qn: str, module_qn: str, literal: Node
+    ) -> list[str]:
+        """The registry variants of `class_qn` that `literal` can name.
+
+        One file declaring `Local` at package level and again inside a
+        function registers both under one qn, the second as a `@line`
+        variant, and a literal fanned out to both. Go scoping says a literal
+        inside the function names the local one and a literal outside it the
+        package one, so choose by position: a declaration inside a function
+        is visible only to literals inside that function, and where one is
+        visible it shadows the package-level twin (CodeRabbit, #1747). Any
+        shape this cannot settle keeps the fan-out.
+        """
+        variants = self._resolver.function_registry.variants(class_qn)
+        if len(variants) < 2 or not class_qn.startswith(
+            f"{module_qn}{cs.SEPARATOR_DOT}"
+        ):
+            return variants
+        name = class_qn.rsplit(cs.SEPARATOR_DOT, 1)[-1]
+        declarations = self._go_type_declaration_scopes(module_qn, name)
+        if len(declarations) != len(variants):
+            return variants
+        by_line = {line: span for line, span in declarations}
+        row = literal.start_point.row
+        package_level: list[str] = []
+        local: list[str] = []
+        for index, variant in enumerate(variants):
+            marker = variant.rsplit(cs.SEPARATOR_DOT, 1)[-1]
+            if cs.DUP_QN_MARKER in marker:
+                suffix = marker.split(cs.DUP_QN_MARKER, 1)[1]
+                line_text = suffix.split(cs.DUP_QN_COLUMN_MARKER, 1)[0]
+                if not line_text.isdigit() or int(line_text) not in by_line:
+                    return variants
+                span = by_line[int(line_text)]
+            else:
+                if index != 0:
+                    return variants
+                span = declarations[0][1]
+            if span is None:
+                package_level.append(variant)
+            elif span[0] <= row <= span[1]:
+                local.append(variant)
+        if len(local) == 1:
+            return local
+        if not local and len(package_level) == 1:
+            return package_level
+        return variants
+
+    def _go_type_declaration_scopes(
+        self, module_qn: str, name: str
+    ) -> list[tuple[int, tuple[int, int] | None]]:
+        """(1-based line, enclosing function row span or None) per `type name`.
+
+        In document order, which is the order the definition pass registered
+        them in, so the first is the natural qn and the rest are variants
+        named by their line.
+        """
+        type_inference = self._resolver.type_inference
+        file_path = type_inference.module_qn_to_file_path.get(module_qn)
+        if file_path is None or not (entry := type_inference.ast_cache.load(file_path)):
+            return []
+        root_node, _ = entry
+        found: list[tuple[int, tuple[int, int] | None]] = []
+        stack: list[tuple[Node, tuple[int, int] | None]] = [(root_node, None)]
+        while stack:
+            node, span = stack.pop()
+            if node.type in _GO_SCOPE_TYPES:
+                span = (node.start_point.row, node.end_point.row)
+            if node.type == cs.TS_GO_TYPE_SPEC:
+                spec_name = node.child_by_field_name(cs.FIELD_NAME)
+                if spec_name is not None and safe_decode_text(spec_name) == name:
+                    found.append((node.start_point.row + 1, span))
+            stack.extend((child, span) for child in node.children)
+        found.sort(key=lambda item: item[0])
+        return found
 
     def _ingest_go_composite_function_references(
         self,
