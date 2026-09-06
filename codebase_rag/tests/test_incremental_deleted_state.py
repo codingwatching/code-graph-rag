@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from unittest.mock import patch
 
 import pytest
 
@@ -402,9 +403,35 @@ def test_a_cpp_interface_parsed_this_run_survives_rehydration(
     _bump(root, "iface.cppm")
     _bump(root, "impl.cpp")
 
-    _updater(store, root, cs.SupportedLanguage.CPP).run(force=False)
+    second = _updater(store, root, cs.SupportedLanguage.CPP)
+    dp = second.factory.definition_processor
+    # The edge assertion below is true of a system where rehydration does
+    # nothing: with the rebuild deleted the set is never cleared, so the
+    # interface stays and the edge is minted anyway (issue #1725, measured).
+    # A planted entry the graph does not hold separates the two: a real
+    # rebuild drops it and keeps `proj.M`; a neutered pass keeps both; the
+    # bare `clear()` this test was written against drops both.
+    dp.cpp_module_interfaces.add("proj.STALE")
+    rebuilt: list[frozenset[str]] = []
+    real_rehydrate = second._rehydrate_registry_from_graph
+
+    def _observe() -> None:
+        real_rehydrate()
+        rebuilt.append(frozenset(dp.cpp_module_interfaces))
+
+    with patch.object(second, "_rehydrate_registry_from_graph", side_effect=_observe):
+        second.run(force=False)
     store.flush_all()
 
+    assert rebuilt, "rehydration never ran, so this test is not about it"
+    assert "proj.STALE" not in rebuilt[-1], (
+        "rehydration kept an interface the graph does not hold, so it did not "
+        f"rebuild the set: {sorted(rebuilt[-1])}"
+    )
+    assert "proj.M" in rebuilt[-1], (
+        "rehydration dropped the interface this run parsed but had not yet "
+        f"flushed: {sorted(rebuilt[-1])}"
+    )
     implements = [
         edge for edge in store.edges if edge[2] == cs.RelationshipType.IMPLEMENTS.value
     ]
