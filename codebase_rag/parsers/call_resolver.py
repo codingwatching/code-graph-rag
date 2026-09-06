@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict, deque
+from collections.abc import Iterator
 from pathlib import PurePath
 
 from loguru import logger
@@ -82,6 +83,35 @@ _PHP_ASCII_FOLD = str.maketrans(
 def _php_fold(name: str) -> str:
     """ASCII-lowercase `name` for PHP-style case-insensitive comparison."""
     return name.translate(_PHP_ASCII_FOLD)
+
+
+def _module_level_assignments(root_node: Node) -> Iterator[Node]:
+    """Every `assignment` that is a top-level expression statement of the module."""
+    for child in root_node.children:
+        if child.type != cs.TS_PY_EXPRESSION_STATEMENT or not child.children:
+            continue
+        assignment = child.children[0]
+        if assignment.type == cs.TS_PY_ASSIGNMENT:
+            yield assignment
+
+
+def _rebound_alias(assignment: Node, name: str, bound: str | None) -> str | None:
+    """`bound` after `assignment`: the alias it binds `name` to, None when it
+    rebinds `name` to a value, `bound` unchanged when it does not touch `name`."""
+    left = assignment.child_by_field_name(cs.TS_FIELD_LEFT)
+    if left is None:
+        return bound
+    # An unpacking target (`Alias, other = make_pair()`) rebinds the name to
+    # a runtime value just as a plain assignment does, and it is never an
+    # alias (#1759 review).
+    if left.type in cs.PY_UNPACKING_TARGET_TYPES:
+        return None if _binds_identifier(left, name) else bound
+    if left.type != cs.TS_PY_IDENTIFIER or safe_decode_text(left) != name:
+        return bound
+    right = assignment.child_by_field_name(cs.TS_FIELD_RIGHT)
+    if right is not None and right.type in (cs.TS_PY_IDENTIFIER, cs.TS_PY_ATTRIBUTE):
+        return safe_decode_text(right)
+    return None
 
 
 def _binds_identifier(target: Node, name: str) -> bool:
@@ -604,6 +634,15 @@ class CallResolver:
         decides: `Alias = Outer` followed by `Alias = make()` holds a value
         by the time anything runs, so it names nothing (#1672 local review).
         """
+        root_node = self._cached_module_root(module_qn)
+        if root_node is None:
+            return None
+        bound: str | None = None
+        for assignment in _module_level_assignments(root_node):
+            bound = _rebound_alias(assignment, name, bound)
+        return bound
+
+    def _cached_module_root(self, module_qn: str) -> Node | None:
         file_path = self.type_inference.module_qn_to_file_path.get(module_qn)
         if file_path is None:
             return None
@@ -613,35 +652,7 @@ class CallResolver:
         if not isinstance(entry, tuple) or len(entry) != 2:
             return None
         root_node = entry[0]
-        if not isinstance(root_node, Node):
-            return None
-        bound: str | None = None
-        for child in root_node.children:
-            if child.type != cs.TS_PY_EXPRESSION_STATEMENT or not child.children:
-                continue
-            assignment = child.children[0]
-            if assignment.type != cs.TS_PY_ASSIGNMENT:
-                continue
-            left = assignment.child_by_field_name(cs.TS_FIELD_LEFT)
-            if left is None:
-                continue
-            # An unpacking target (`Alias, other = make_pair()`) rebinds the
-            # name to a runtime value just as a plain assignment does, and
-            # it is never an alias (#1759 review).
-            if left.type in cs.PY_UNPACKING_TARGET_TYPES:
-                if _binds_identifier(left, name):
-                    bound = None
-                continue
-            if left.type != cs.TS_PY_IDENTIFIER or safe_decode_text(left) != name:
-                continue
-            right = assignment.child_by_field_name(cs.TS_FIELD_RIGHT)
-            bound = (
-                safe_decode_text(right)
-                if right is not None
-                and right.type in (cs.TS_PY_IDENTIFIER, cs.TS_PY_ATTRIBUTE)
-                else None
-            )
-        return bound
+        return root_node if isinstance(root_node, Node) else None
 
     def _class_is_nested_in(self, class_qn: str, owner_qn: str) -> bool:
         """Whether `class_qn` is declared inside `owner_qn` or one of its bases.
