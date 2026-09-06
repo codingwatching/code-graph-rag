@@ -19,7 +19,7 @@ from . import constants as fc
 from .qn import CppQnResolver
 
 if TYPE_CHECKING:
-    from clang.cindex import Cursor
+    from clang.cindex import Cursor, Token
 
 _NodeKey = tuple[str, str]
 _EdgeKey = tuple[str, str, str, str, str]
@@ -98,6 +98,47 @@ def _classify(cursor: Cursor) -> str | None:
             return fc.LABEL_METHOD
         return fc.LABEL_FUNCTION
     return None
+
+
+def _macro_body_identifiers(cursor: Cursor) -> set[str]:
+    """Identifiers a macro's body references, excluding its own name and its
+    parameters.
+
+    Body tokens are those after the macro's own name. A function-like macro
+    ('(' abutting the name, the standard's distinction from an object-like
+    body that starts with a parenthesis) has its parameter list skipped and
+    those names excluded from the body: a parameter is substituted by the
+    caller's argument, so one named like a real macro is not a reference to
+    it.
+    """
+    tokens = list(cursor.get_tokens())
+    body_start, params = _macro_parameter_list(tokens)
+    return {
+        t.spelling
+        for t in tokens[body_start:]
+        if t.spelling.isidentifier()
+        and t.spelling != cursor.spelling
+        and t.spelling not in params
+    }
+
+
+def _macro_parameter_list(tokens: list[Token]) -> tuple[int, set[str]]:
+    """(index of the first body token, parameter names) for a macro's tokens."""
+    name_end = tokens[0].extent.end
+    if not (
+        len(tokens) > 1
+        and tokens[1].spelling == fc.TOKEN_LPAREN
+        and tokens[1].extent.start.line == name_end.line
+        and tokens[1].extent.start.column == name_end.column
+    ):
+        return 1, set()
+    params: set[str] = set()
+    for i, tok in enumerate(tokens[2:], start=2):
+        if tok.spelling == fc.TOKEN_RPAREN:
+            return i + 1, params
+        if tok.spelling.isidentifier():
+            params.add(tok.spelling)
+    return len(tokens), params
 
 
 class _Collector:
@@ -407,36 +448,7 @@ class _Collector:
             fc.LABEL_FUNCTION,
             qn,
         )
-        # Body tokens after the macro's own name. A function-like macro ('('
-        # abutting the name, the standard's distinction from an object-like
-        # body that starts with a parenthesis) has its parameter list skipped
-        # and those names excluded from the body: a parameter is substituted by
-        # the caller's argument, so one named like a real macro is not a
-        # reference to it.
-        tokens = list(cursor.get_tokens())
-        body_start = 1
-        params: set[str] = set()
-        name_end = tokens[0].extent.end
-        if (
-            len(tokens) > 1
-            and tokens[1].spelling == fc.TOKEN_LPAREN
-            and tokens[1].extent.start.line == name_end.line
-            and tokens[1].extent.start.column == name_end.column
-        ):
-            body_start = len(tokens)
-            for i, tok in enumerate(tokens[2:], start=2):
-                if tok.spelling == fc.TOKEN_RPAREN:
-                    body_start = i + 1
-                    break
-                if tok.spelling.isidentifier():
-                    params.add(tok.spelling)
-        refs = {
-            t.spelling
-            for t in tokens[body_start:]
-            if t.spelling.isidentifier()
-            and t.spelling != cursor.spelling
-            and t.spelling not in params
-        }
+        refs = _macro_body_identifiers(cursor)
         if refs:
             self._macro_body_refs.setdefault(qn, set()).update(refs)
 

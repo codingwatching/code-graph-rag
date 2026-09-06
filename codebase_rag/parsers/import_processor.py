@@ -466,6 +466,30 @@ def _rust_norm_manifest_path(path: str) -> str:
     return posixpath.normpath(path.replace("\\", cs.SEPARATOR_SLASH))
 
 
+def _cpp_include_spec(include_node: Node) -> tuple[str, bool] | None:
+    """(include path, is a system include) from a `preproc_include`, or None.
+
+    The LAST string child wins, as it always did; a quoted path is stripped
+    of its quotes and an angle-bracket path of its brackets.
+    """
+    spec: tuple[str, bool] | None = None
+    for child in include_node.children:
+        if child.type == cs.TS_STRING_LITERAL:
+            spec = (safe_decode_with_fallback(child).strip('"'), False)
+        elif child.type == cs.TS_SYSTEM_LIB_STRING:
+            spec = (safe_decode_with_fallback(child).strip("<>"), True)
+    return spec if spec is not None and spec[0] else None
+
+
+def _cpp_include_local_name(include_path: str) -> str:
+    """The name the include binds locally: the header's stem for `.h`/`.hpp`,
+    the bare last path segment otherwise (`<vector>`)."""
+    header_name = include_path.rsplit(cs.SEPARATOR_SLASH, maxsplit=1)[-1]
+    if header_name.endswith(cs.EXT_H) or header_name.endswith(cs.EXT_HPP):
+        return header_name.split(cs.SEPARATOR_DOT)[0]
+    return header_name
+
+
 class ImportProcessor:
     __slots__ = (
         "repo_path",
@@ -4148,58 +4172,51 @@ class ImportProcessor:
         return self._cpp_module_qn_map[matches[0]]
 
     def _parse_cpp_include(self, include_node: Node, module_qn: str) -> None:
-        include_path = None
-        is_system_include = False
+        spec = _cpp_include_spec(include_node)
+        if spec is None:
+            return
+        include_path, is_system_include = spec
+        local_name = _cpp_include_local_name(include_path)
+        full_name = self._cpp_include_full_name(
+            include_path, is_system_include, module_qn
+        )
+        self.import_mapping[module_qn][local_name] = full_name
+        self._record_import_site(module_qn, local_name, include_node, include_path)
+        logger.debug(
+            ls.IMP_CPP_INCLUDE,
+            local=local_name,
+            full=full_name,
+            system=is_system_include,
+        )
 
-        for child in include_node.children:
-            if child.type == cs.TS_STRING_LITERAL:
-                include_path = safe_decode_with_fallback(child).strip('"')
-                is_system_include = False
-            elif child.type == cs.TS_SYSTEM_LIB_STRING:
-                include_path = safe_decode_with_fallback(child).strip("<>")
-                is_system_include = True
-
-        if include_path:
-            header_name = include_path.split(cs.SEPARATOR_SLASH)[-1]
-            if header_name.endswith(cs.EXT_H) or header_name.endswith(cs.EXT_HPP):
-                local_name = header_name.split(cs.SEPARATOR_DOT)[0]
-            else:
-                local_name = header_name
-
-            if is_system_include:
-                # The token, not the substring: `startswith("std")` took
-                # `<stdio.h>`, `<stdlib.h>`, `<stdint.h>` and the rest of that
-                # family as already prefixed, so they became ExternalModule
-                # `stdio.h` while `<signal.h>` in the same file became
-                # `std.signal.h` (issue #1744).
-                full_name = (
-                    include_path
-                    if include_path == cs.CPP_STD_PREFIX
-                    or include_path.startswith(cs.IMPORT_STD_PREFIX)
-                    else f"{cs.IMPORT_STD_PREFIX}{include_path}"
-                )
-            elif resolved := self._resolve_cpp_include_target(include_path, module_qn):
-                # The include resolves to a real repo file; use that file's
-                # actual (collision-disambiguated) module qn. The old
-                # project-rooted, extension-stripped guess produced phantom
-                # module qns (self-imports for same-stem header/source pairs,
-                # wrong roots for -I style includes), which poisoned both the
-                # IMPORTS edges and class resolution via the import map
-                # (issue #652).
-                full_name = resolved
-            else:
-                # A quoted include matching no repo file is a third-party header; a
-                # project-rooted qn would be a phantom.
-                full_name = f"{cs.IMPORT_STD_PREFIX}{include_path}"
-
-            self.import_mapping[module_qn][local_name] = full_name
-            self._record_import_site(module_qn, local_name, include_node, include_path)
-            logger.debug(
-                ls.IMP_CPP_INCLUDE,
-                local=local_name,
-                full=full_name,
-                system=is_system_include,
-            )
+    def _cpp_include_full_name(
+        self, include_path: str, is_system_include: bool, module_qn: str
+    ) -> str:
+        """The module qn an include names: `std.<path>` for a system header or
+        an unresolved quoted one, else the repo file the include resolves to."""
+        if is_system_include:
+            # The token, not the substring: `startswith("std")` took
+            # `<stdio.h>`, `<stdlib.h>`, `<stdint.h>` and the rest of that
+            # family as already prefixed, so they became ExternalModule
+            # `stdio.h` while `<signal.h>` in the same file became
+            # `std.signal.h` (issue #1744).
+            if include_path == cs.CPP_STD_PREFIX or include_path.startswith(
+                cs.IMPORT_STD_PREFIX
+            ):
+                return include_path
+            return f"{cs.IMPORT_STD_PREFIX}{include_path}"
+        if resolved := self._resolve_cpp_include_target(include_path, module_qn):
+            # The include resolves to a real repo file; use that file's
+            # actual (collision-disambiguated) module qn. The old
+            # project-rooted, extension-stripped guess produced phantom
+            # module qns (self-imports for same-stem header/source pairs,
+            # wrong roots for -I style includes), which poisoned both the
+            # IMPORTS edges and class resolution via the import map
+            # (issue #652).
+            return resolved
+        # A quoted include matching no repo file is a third-party header; a
+        # project-rooted qn would be a phantom.
+        return f"{cs.IMPORT_STD_PREFIX}{include_path}"
 
     def _parse_cpp_module_import(self, import_node: Node, module_qn: str) -> None:
         identifier_child = None
