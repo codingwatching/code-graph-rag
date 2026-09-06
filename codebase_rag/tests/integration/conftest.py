@@ -45,8 +45,9 @@ def memgraph_container() -> Generator[dict[str, str | int], None, None]:
     # the `container.stop()` below and left its container running; each one
     # is a permanent charge against the memory the next run needs (issue
     # #1628). Nothing in-process survives being killed, so the next session
-    # cleans up for the last one, by the label this fixture puts on its own
-    # container.
+    # cleans up for the last one, by the labels this fixture puts on its own
+    # container: the marker, and the host and pid that own it, so a session
+    # sharing the daemon with a LIVE suite leaves that suite's database alone.
     reap_orphaned_containers(DockerClient().client)
 
     # Same engine line the packaged stack pins (issue #1257): integration
