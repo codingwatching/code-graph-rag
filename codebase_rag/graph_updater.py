@@ -317,6 +317,55 @@ def _open_exclusive_temp(cache_path: Path) -> tuple[int, str]:
     raise OSError(f"could not create a temporary file beside {cache_path}")
 
 
+def _fsync_no_follow(path: Path) -> None:
+    """Sync `path` to disk through a fresh no-follow descriptor.
+
+    O_RDWR, not O_RDONLY: on Windows `os.fsync` is `_commit()`, which needs
+    a handle opened for WRITING and reports a read-only one as EBADF (#1701
+    review, measured in CI). No O_TRUNC and no write follows, so the
+    contents are untouched. O_NOFOLLOW so a link swapped in at the path
+    cannot redirect the sync.
+    """
+    sync_fd = os.open(path, os.O_RDWR | getattr(os, "O_NOFOLLOW", 0))
+    try:
+        os.fsync(sync_fd)
+    finally:
+        os.close(sync_fd)
+
+
+def _stamp_by_path(tmp_path: Path, observed_at: float) -> None:
+    """Set the temporary's mtime through its PATH, where a descriptor cannot.
+
+    Windows is the platform this exists for, and its `os.utime` supports
+    NEITHER a descriptor NOR `follow_symlinks`: `Lib/os.py` adds `utime` to
+    `supports_follow_symlinks` only for `HAVE_LUTIMES`/`HAVE_UTIMENSAT`,
+    which `PC/pyconfig.h` does not define, and passing the keyword there
+    raises NotImplementedError (#1701 local review; an earlier revision
+    refused here and would have declined every Windows publish). So on
+    Windows the stamp goes through the path, guarded by the caller's
+    `S_ISLNK` refusal: a link swapped in before that lstat is refused, and
+    one swapped in between the lstat and this call needs the same directory
+    write access that already lets an attacker rewrite the cache outright,
+    plus the symlink privilege Windows withholds by default.
+
+    Any OTHER platform with neither capability has no safe stamp at all, and
+    stamping through the path there reopens the exact window this closes: a
+    link swapped in after the check gets its TARGET timestamped (#1701
+    review, measured by forcing the branch). Declining the publish is the
+    safe error: the previous cache stays and the next run re-hashes, where a
+    mis-stamped publish loses edits.
+    """
+    if _WINDOWS:
+        os.utime(tmp_path, (observed_at, observed_at))
+    elif os.utime in os.supports_follow_symlinks:
+        os.utime(tmp_path, (observed_at, observed_at), follow_symlinks=False)
+    else:
+        raise OSError(
+            "cannot stamp the hash cache without following symlinks "
+            f"on this platform; not publishing {tmp_path}"
+        )
+
+
 def _publish_hash_cache(
     cache_path: Path, hashes: FileHashCache, observed_at: float | None
 ) -> bool:
@@ -406,26 +455,11 @@ def _publish_hash_cache(
         # text wrapper, and it raised "[Errno 9] Bad file descriptor" there --
         # 39 tests red on Windows while ubuntu and macOS stayed green, twice
         # in a row, because reordering fstat and fsync inside the block was
-        # not enough (#1701 review, measured in CI both times).
-        #
-        # Reopened with O_NOFOLLOW, so a link swapped in between the close and
-        # here cannot redirect the sync; the inode check below still refuses a
+        # not enough (#1701 review, measured in CI both times). The reopen
+        # is no-follow, so a link swapped in between the close and here
+        # cannot redirect the sync; the inode check below still refuses a
         # swapped path before anything is published.
-        #
-        # O_RDWR, not O_RDONLY. On Windows `os.fsync` is `_commit()`, which
-        # calls FlushFileBuffers, and that needs a handle opened for WRITING:
-        # on a read-only handle it fails and the CRT reports it as EBADF.
-        # Every hash-cache publish on that platform died here with "[Errno 9]
-        # Bad file descriptor" and 39 tests went red while ubuntu and macOS,
-        # whose fsync accepts any descriptor, stayed green (#1701 review,
-        # measured in CI: errno=9, failing_path=None, i.e. not an open()).
-        # No O_TRUNC and no write follows, so the contents are untouched.
-        sync_flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
-        sync_fd = os.open(tmp_path, sync_flags)
-        try:
-            os.fsync(sync_fd)
-        finally:
-            os.close(sync_fd)
+        _fsync_no_follow(tmp_path)
         # A cheap refusal, not the security boundary. The boundary is the
         # threat model, and it is worth stating because "there is still a
         # window between this check and the rename" is true and does not
@@ -482,58 +516,16 @@ def _publish_hash_cache(
             # stamp before it would follow a symlink swapped in after
             # creation and rewrite the link target's timestamp, which is
             # measured and was the whole point of the descriptor-based stamp.
+            # `_stamp_by_path` carries the per-platform argument.
             #
             # Durability is then restored by re-opening and syncing, rather
             # than by moving the stamp earlier: a crash between the utime and
             # the replace would otherwise publish a cache carrying its write
             # time instead of `observed_at`, and `_is_already_in_sync` trusts
             # that mtime, so it would skip edits made during the run (#1701
-            # review). O_NOFOLLOW again, for the same reason as the first
-            # open.
-            # `follow_symlinks=False` closes the finding directly rather than
-            # by argument: if a link is swapped in between the inode check and
-            # here, the stamp lands on the LINK, not on whatever it points at,
-            # so no external file's metadata can be touched (#1701 review).
-            #
-            # Windows is the platform this branch exists for, and its
-            # `os.utime` supports NEITHER a descriptor NOR `follow_symlinks`:
-            # `Lib/os.py` adds `utime` to `supports_follow_symlinks` only for
-            # `HAVE_LUTIMES`/`HAVE_UTIMENSAT`, which `PC/pyconfig.h` does not
-            # define, and passing the keyword there raises NotImplementedError
-            # (#1701 local review; an earlier revision refused here and would
-            # have declined every Windows publish). So on Windows the stamp
-            # goes through the PATH, guarded by the `S_ISLNK` refusal above:
-            # a link swapped in before that lstat is refused, and one swapped
-            # in between the lstat and this call needs the same directory
-            # write access that already lets an attacker rewrite the cache
-            # outright, plus the symlink privilege Windows withholds by
-            # default. That is the threat-model argument the inode check
-            # already rests on.
-            #
-            # Any OTHER platform with neither capability has no safe stamp at
-            # all, and stamping through the path there reopens the exact
-            # window this branch closes -- a link swapped in after the check
-            # gets its TARGET timestamped (#1701 review, measured by forcing
-            # the branch). Declining the publish is the safe error: the
-            # previous cache stays and the next run re-hashes, where a
-            # mis-stamped publish loses edits.
-            if _WINDOWS:
-                os.utime(tmp_path, (observed_at, observed_at))
-            elif os.utime in os.supports_follow_symlinks:
-                os.utime(tmp_path, (observed_at, observed_at), follow_symlinks=False)
-            else:
-                raise OSError(
-                    "cannot stamp the hash cache without following symlinks "
-                    f"on this platform; not publishing {tmp_path}"
-                )
-            # O_RDWR for the same Windows `_commit()` reason as the first
-            # sync: a read-only handle cannot be flushed there.
-            sync_flags = os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
-            sync_fd = os.open(tmp_path, sync_flags)
-            try:
-                os.fsync(sync_fd)
-            finally:
-                os.close(sync_fd)
+            # review).
+            _stamp_by_path(tmp_path, observed_at)
+            _fsync_no_follow(tmp_path)
         os.replace(tmp_path, cache_path)
         logger.info(ls.HASH_CACHE_SAVED, count=len(hashes), path=cache_path)
         return True
