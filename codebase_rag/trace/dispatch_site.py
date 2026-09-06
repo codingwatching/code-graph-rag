@@ -89,13 +89,21 @@ def _is_invoked(expr: Node) -> bool:
 
 
 def _bound_name(expr: Node) -> str | None:
-    """`name` when `expr` is the whole right side of `name = expr`."""
-    parent = expr.parent
+    """`name` when `expr` is the whole right side of `name = expr`.
+
+    Seen through parentheses: `name = (expr)` binds the same lookup, and
+    without the climb the literal form of a stored lookup was not recorded
+    as the binding (#1543 review).
+    """
+    value: Node = expr
+    parent = value.parent
+    while parent is not None and parent.type == cs.TS_PARENTHESIZED_EXPRESSION:
+        value, parent = parent, parent.parent
     if parent is None or parent.type != cs.TS_PY_ASSIGNMENT:
         return None
     left = parent.child_by_field_name(cs.FIELD_LEFT)
     right = parent.child_by_field_name(cs.FIELD_RIGHT)
-    if left is None or right != expr or left.type != cs.TS_PY_IDENTIFIER:
+    if left is None or right != value or left.type != cs.TS_PY_IDENTIFIER:
         return None
     return safe_decode_text(left)
 

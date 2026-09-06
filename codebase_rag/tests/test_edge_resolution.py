@@ -498,11 +498,15 @@ def test_a_stored_computed_lookup_called_later_makes_the_edge_unlocatable(
         assert (
             locate_dispatch_literal(tmp_path, "wrapped.py", 1, 3, "target") is None
         ), wrapped
-    # Stored from a literal key, the lookup is the site itself.
-    (tmp_path / "plain.py").write_text(
-        'def run(registry):\n    fn = registry["target"]\n    return fn()\n'
-    )
-    assert locate_dispatch_literal(tmp_path, "plain.py", 1, 3, "target") is not None
+    # Stored from a literal key, the lookup is the site itself, parenthesised
+    # or not (#1543 review).
+    for spelling in ('registry["target"]', '(registry["target"])'):
+        (tmp_path / "plain.py").write_text(
+            f"def run(registry):\n    fn = {spelling}\n    return fn()\n"
+        )
+        assert (
+            locate_dispatch_literal(tmp_path, "plain.py", 1, 3, "target") is not None
+        ), spelling
 
 
 def test_a_computed_callable_captured_from_an_enclosing_scope_is_computed(
