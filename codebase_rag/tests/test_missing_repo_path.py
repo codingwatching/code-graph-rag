@@ -26,7 +26,7 @@ def py_project(temp_repo: Path) -> Path:
     return temp_repo
 
 
-def _updater(target: Path, ingestor: MagicMock) -> GraphUpdater:
+def _create_graph_updater(target: Path, ingestor: MagicMock) -> GraphUpdater:
     parsers, queries = load_parsers()
     return GraphUpdater(
         ingestor=ingestor, repo_path=target, parsers=parsers, queries=queries
@@ -41,13 +41,13 @@ def test_a_run_rooted_at_a_deleted_file_raises(
     Before the fix the second run completed without raising and rewrote
     nothing; the caller could not tell that from a successful re-index.
     """
-    _updater(py_project, mock_ingestor).run()
+    _create_graph_updater(py_project, mock_ingestor).run()
     before = (py_project / cs.HASH_CACHE_FILENAME).read_text(encoding="utf-8")
     target = py_project / "module_a.py"
     target.unlink()
     assert not target.exists(), "fixture guard: the target must be gone"
 
-    updater = _updater(target, mock_ingestor)
+    updater = _create_graph_updater(target, mock_ingestor)
     with pytest.raises(FileNotFoundError, match="module_a.py"):
         updater.run()
 
@@ -60,7 +60,7 @@ def test_a_run_rooted_at_a_missing_directory_raises(
     tmp_path: Path, mock_ingestor: MagicMock
 ) -> None:
     missing = tmp_path / "no_such_project"
-    updater = _updater(missing, mock_ingestor)
+    updater = _create_graph_updater(missing, mock_ingestor)
     with pytest.raises(FileNotFoundError, match="no_such_project"):
         updater.run()
     assert not mock_ingestor.ensure_node_batch.called, (
@@ -77,15 +77,15 @@ def test_construction_alone_does_not_require_the_path(
     exercise parsers and registries without ever running; the constructor
     stays cheap and side-effect free for them.
     """
-    _updater(tmp_path / "never_run", mock_ingestor)
+    _create_graph_updater(tmp_path / "never_run", mock_ingestor)
 
 
 def test_the_controls_still_run(py_project: Path, mock_ingestor: MagicMock) -> None:
     """A directory and an existing single file both run as before."""
-    _updater(py_project, mock_ingestor).run()
+    _create_graph_updater(py_project, mock_ingestor).run()
     assert mock_ingestor.ensure_node_batch.called
     mock_ingestor.reset_mock()
-    single = _updater(py_project / "module_a.py", mock_ingestor)
+    single = _create_graph_updater(py_project / "module_a.py", mock_ingestor)
     assert single._single_file is not None, "fixture guard: not a single-file run"
     single.run()
     assert mock_ingestor.ensure_node_batch.called
