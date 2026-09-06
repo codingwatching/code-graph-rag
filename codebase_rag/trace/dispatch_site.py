@@ -32,6 +32,19 @@ from ..types_defs import PropertyDict
 # `<lambda>` frames as synthetic, so a call made inside one is never
 # attributed to the enclosing function and its literals cannot be that
 # function's dispatch site.
+# A literal binding under one of these did not necessarily run before a call
+# below it: `fn = fallback; if c: fn = table["x"]; fn()` calls the fallback on
+# the false branch, so the literal is not a definite site (#1543 review).
+_CONDITIONAL_FLOW = frozenset(
+    {
+        cs.TS_PY_IF_STATEMENT,
+        cs.TS_PY_FOR_STATEMENT,
+        cs.TS_PY_WHILE_STATEMENT,
+        cs.TS_PY_TRY_STATEMENT,
+        cs.TS_PY_MATCH_STATEMENT,
+        cs.TS_PY_WITH_STATEMENT,
+    }
+)
 _NESTED_SCOPES = frozenset(
     {cs.TS_PY_FUNCTION_DEFINITION, cs.TS_PY_CLASS_DEFINITION, cs.TS_PY_LAMBDA}
 )
@@ -214,6 +227,8 @@ class _BodyScan:
     # call of the name cannot have supplied that call's value either.
     bound_literal: dict[str, list[Node]] = field(default_factory=dict)
     bound_literal_line: dict[str, int] = field(default_factory=dict)
+    # Names whose literal binding sits under conditional control flow.
+    conditionally_bound: set[str] = field(default_factory=set)
     # Computed names: bound from a non-literal lookup, in the body or in an
     # enclosing scope; a body assignment of any other kind masks an outer one,
     # but only for calls AFTER it. `rebound_inner` and `called` therefore
@@ -269,6 +284,8 @@ class _BodyScan:
             # therefore unlocatable rather than guessed at.
             self.bound_literal.setdefault(bound, []).append(node)
             self._note_first(self.bound_literal_line, bound, node.start_point[0] + 1)
+            if _under_conditional_flow(lookup):
+                self.conditionally_bound.add(bound)
 
     def sites(self) -> list[Node] | None:
         """The located sites, or None when the body makes the edge unlocatable."""
@@ -297,9 +314,27 @@ class _BodyScan:
             for name, line in self.bound_literal_line.items()
         ):
             return None
+        # A literal binding under an `if`, a loop, a `try` or a `match` ran
+        # on some paths to the call and not others; whether THIS call used it
+        # or a fallback bound elsewhere is data flow the scan does not do, so
+        # the site is unlocatable rather than guessed at (#1543 review).
+        if any(name in self.called for name in self.conditionally_bound):
+            return None
         return self.direct + [
             lits[0] for name, lits in self.bound_literal.items() if name in self.called
         ]
+
+
+def _under_conditional_flow(node: Node) -> bool:
+    """Whether `node` sits under conditional or looping control flow within its
+    own callable: the walk stops at the first enclosing definition, whose
+    body is unconditional relative to the call being located."""
+    current = node.parent
+    while current is not None and current.type not in _NESTED_SCOPES:
+        if current.type in _CONDITIONAL_FLOW:
+            return True
+        current = current.parent
+    return False
 
 
 def _visit_enclosing(node: Node, scan: _BodyScan) -> bool:

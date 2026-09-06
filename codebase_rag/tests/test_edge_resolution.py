@@ -657,6 +657,41 @@ def test_a_literal_binding_after_the_call_is_not_its_site(tmp_path: Path) -> Non
     assert site[cs.KEY_LINE] == 3
 
 
+@pytest.mark.parametrize(
+    "guard",
+    [
+        '    if flag:\n        fn = registry["target"]\n',
+        '    for _ in items:\n        fn = registry["target"]\n',
+        '    try:\n        fn = registry["target"]\n    except KeyError:\n        pass\n',
+    ],
+)
+def test_a_conditional_literal_binding_is_not_a_definite_site(
+    tmp_path: Path, guard: str
+) -> None:
+    from codebase_rag.trace.dispatch_site import locate_dispatch_literal
+
+    # `fn` starts as a fallback and is rebound from the literal lookup only on
+    # some paths; the call below may have used either. Recording the literal
+    # would point the dynamic edge at an expression that did not run for the
+    # fallback path (#1543 review), so the site is unlocatable.
+    (tmp_path / "app.py").write_text(
+        "def run(registry, flag, items, fallback):\n"
+        "    fn = fallback\n" + guard + "    return fn()\n"
+    )
+    lines = 3 + guard.count("\n")
+    assert locate_dispatch_literal(tmp_path, "app.py", 1, lines, "target") is None
+    # The control: the same binding, unconditional, is the site.
+    (tmp_path / "plain.py").write_text(
+        "def run(registry, fallback):\n"
+        "    fn = fallback\n"
+        '    fn = registry["target"]\n'
+        "    return fn()\n"
+    )
+    site = locate_dispatch_literal(tmp_path, "plain.py", 1, 4, "target")
+    assert site is not None
+    assert site[cs.KEY_LINE] == 3
+
+
 def test_a_nested_callers_literal_is_its_own_and_siblings_do_not_leak(
     tmp_path: Path,
 ) -> None:
