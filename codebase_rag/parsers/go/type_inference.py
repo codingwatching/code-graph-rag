@@ -189,8 +189,6 @@ class GoTypeInferenceEngine:
                 self._collect_var_declaration(node, var_types)
             case cs.TS_GO_SHORT_VAR_DECLARATION:
                 self._collect_short_var_declaration(node, var_types)
-            case _:
-                pass
         for child in node.children:
             self._collect_body_declarations(child, var_types)
 

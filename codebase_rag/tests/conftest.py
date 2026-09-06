@@ -285,12 +285,12 @@ def _isolate_vector_store(
 @pytest.fixture(autouse=True)
 def _isolate_cgr_home(
     tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch
-) -> Generator[Path, None, None]:
+) -> Path:
     from codebase_rag.config import settings
 
     home = tmp_path_factory.mktemp("cgr-home-iso")
     monkeypatch.setattr(settings, "CGR_HOME", home)
-    yield home
+    return home
 
 
 # What `shutil.rmtree` passes to `onexc` besides the removals. None of these

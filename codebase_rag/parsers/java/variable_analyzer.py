@@ -292,8 +292,6 @@ class JavaVariableAnalyzerMixin:
 
                     if object_name and field_name:
                         return f"{object_name}{cs.SEPARATOR_DOT}{field_name}"
-            case _:
-                pass
 
         return None
 
@@ -406,9 +404,6 @@ class JavaVariableAnalyzerMixin:
                 if type_node := expr_node.child_by_field_name(cs.FIELD_TYPE):
                     if base_type := safe_decode_text(type_node):
                         return f"{base_type}{cs.JAVA_ARRAY_SUFFIX}"
-
-            case _:
-                pass
 
         return None
 
