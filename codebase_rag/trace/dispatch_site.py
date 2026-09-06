@@ -131,16 +131,24 @@ def _called_identifier(node: Node) -> str | None:
     """The bare name a call invokes (`fn()`), if any."""
     if node.type != cs.TS_PY_CALL:
         return None
-    func = node.child_by_field_name(cs.FIELD_FUNCTION)
-    # `(fn)()` wraps the callee in a parenthesized_expression; the call is
-    # still of the bare name, and without the unwrap a stored computed
-    # lookup invoked this way was not recognised, so an unrelated literal in
-    # the same body could be recorded as the site (#1543 review).
-    while func is not None and func.type == cs.TS_PARENTHESIZED_EXPRESSION:
-        func = next((c for c in func.named_children), None)
+    func = _unparenthesised(node.child_by_field_name(cs.FIELD_FUNCTION))
     if func is None or func.type != cs.TS_PY_IDENTIFIER:
         return None
     return safe_decode_text(func)
+
+
+def _unparenthesised(func: Node | None) -> Node | None:
+    """The callee under any parentheses: `(fn)()`, `(table[key])()`.
+
+    The call is still of what the parentheses hold, and without the unwrap
+    a stored computed lookup invoked as `(fn)()` was not recognised as a
+    call, and `(registry[name])()` was not recognised as a computed
+    dispatch, so an unrelated invoked literal in the same body could be
+    recorded as the site (#1543 review).
+    """
+    while func is not None and func.type == cs.TS_PARENTHESIZED_EXPRESSION:
+        func = next((c for c in func.named_children), None)
+    return func
 
 
 def _is_computed_dispatch(node: Node) -> bool:
@@ -151,7 +159,7 @@ def _is_computed_dispatch(node: Node) -> bool:
     """
     if node.type != cs.TS_PY_CALL:
         return False
-    func = node.child_by_field_name(cs.FIELD_FUNCTION)
+    func = _unparenthesised(node.child_by_field_name(cs.FIELD_FUNCTION))
     if func is None:
         return False
     if func.type == cs.TS_PY_SUBSCRIPT:

@@ -484,6 +484,17 @@ def test_a_stored_computed_lookup_called_later_makes_the_edge_unlocatable(
         "    return (fn)()\n"
     )
     assert locate_dispatch_literal(tmp_path, "paren.py", 1, 4, "target") is None
+    # The lookup itself may be parenthesised: `(registry[name])()` is a
+    # computed dispatch, and `(getattr(obj, name))()` likewise (#1543 review).
+    for wrapped in ("(registry[name])()", "(getattr(obj, name))()"):
+        (tmp_path / "wrapped.py").write_text(
+            "def run(obj, registry, name, other):\n"
+            f"    {wrapped}\n"
+            '    getattr(other, "target")()\n'
+        )
+        assert (
+            locate_dispatch_literal(tmp_path, "wrapped.py", 1, 3, "target") is None
+        ), wrapped
     # Stored from a literal key, the lookup is the site itself.
     (tmp_path / "plain.py").write_text(
         'def run(registry):\n    fn = registry["target"]\n    return fn()\n'
