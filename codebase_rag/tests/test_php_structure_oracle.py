@@ -69,4 +69,5 @@ def test_cgr_matches_php_parser_oracle_on_php_structure(tmp_path: Path) -> None:
     for label in ("Class", "Interface", "Enum", "Method", "Function"):
         row = by_label.get(label)
         assert row is not None, (label, by_label)
-        assert row["precision"] == 1.0 and row["recall"] == 1.0, (label, row)
+        assert row["precision"] == 1.0, (label, row)
+        assert row["recall"] == 1.0, (label, row)
