@@ -21,6 +21,7 @@ from codebase_rag.graph_updater import (
     _save_hash_cache,
 )
 from codebase_rag.parser_loader import load_parsers
+from codebase_rag.tests.conftest import force_mtime_after_cache
 
 
 @pytest.fixture
@@ -251,6 +252,10 @@ class TestIncrementalUpdates:
         updater.run()
 
         (py_project / "module_a.py").write_text("def func_a_updated():\n    pass\n")
+        # The rewrite must land on a later tick than the cache the run just
+        # wrote, or the hashing loop skips it; the margin otherwise is only
+        # the run's own duration (issue #1640).
+        force_mtime_after_cache(py_project, py_project / "module_a.py")
 
         updater2 = GraphUpdater(
             ingestor=mock_ingestor,
@@ -1124,6 +1129,9 @@ class TestFastPathInSync:
         updater.run()
 
         (py_project / "module_a.py").write_text("def func_a():\n    return 1\n")
+        # Same precondition as above: the fast path compares this mtime with
+        # the cache's, and equal ticks read as unchanged (issue #1640).
+        force_mtime_after_cache(py_project, py_project / "module_a.py")
 
         updater2 = GraphUpdater(
             ingestor=mock_ingestor,

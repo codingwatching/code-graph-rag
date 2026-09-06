@@ -614,6 +614,39 @@ def collect_loose_objects(repo: Path) -> tuple[list[str], list[int]]:
     return listed, readonly_modes
 
 
+def force_mtime_after_cache(repo: Path, source: Path) -> None:
+    """Put `source` on a strictly later tick than the hash cache file.
+
+    An incremental run only re-hashes a cached file whose mtime is strictly
+    greater than the cache file's own (`if file_mtime <= cache_mtime`), so a
+    rewrite that lands on the same filesystem tick as the cache written by the
+    preceding run is SKIPPED and the run under test never reaches the code the
+    test is about. Since #1615 the cache file is restamped back to the instant
+    observed before the previous run's hashing loop, so on a fine-grained clock
+    the two differ by that run's own hashing and later passes; on a coarse one
+    they can still collide, which is why this failed on Windows py3.12.
+    Stating the precondition removes the dependency on clock resolution.
+
+    Shared by every test that rewrites a cached source right after a run and
+    needs the rewrite re-hashed (issue #1640); the margin such a test gets
+    otherwise is whatever the preceding run happened to cost.
+    """
+    cache_mtime = (repo / rag_cs.HASH_CACHE_FILENAME).stat().st_mtime
+    # Read back and advance until the STORED stamp is strictly later: a
+    # filesystem with coarse mtime resolution can round the requested value
+    # onto the cache's own tick, which is the collision this exists to
+    # remove (CodeRabbit, #1743).
+    stamp = cache_mtime + 1.0
+    for _ in range(8):
+        os.utime(source, (stamp, stamp))
+        if source.stat().st_mtime > cache_mtime:
+            return
+        stamp += 1.0
+    raise AssertionError(
+        f"could not stamp {source} later than the hash cache ({cache_mtime})"
+    )
+
+
 def git_env(**overrides: str) -> dict[str, str]:
     """A Git environment with every inherited `GIT_*` routing variable gone.
 
