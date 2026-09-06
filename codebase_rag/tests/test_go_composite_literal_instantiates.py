@@ -31,6 +31,7 @@ SVC_GO = (
     'func reassign() *Error  { var e *Error; e = &Error{Msg: "e"}; return e }\n'
     "func generic() Box[int] { return Box[int]{V: 1} }\n"
     'func container() []Error { return []Error{{Msg: "f"}} }\n\n'
+    'var moduleError = &Error{Msg: "module scope"}\n\n'
     "func callsMethod() string {\n"
     '\terr := errors.New("x")\n'
     "\treturn err.Error()\n"
@@ -84,6 +85,9 @@ def test_every_struct_construction_form_emits_instantiates(tmp_path: Path) -> No
     # emits nothing rather than guessing.
     assert "callsMethod" not in by_caller, by_caller.get("callsMethod")
     assert "container" not in by_caller, by_caller.get("container")
+    # A package-level `var e = &Error{}` constructs too; its edge hangs off
+    # the Module node (CodeRabbit, #1747).
+    assert by_caller.get("svc") == {error_qn}, by_caller.get("svc")
 
 
 def test_a_qualified_construction_resolves_through_the_import(tmp_path: Path) -> None:
@@ -132,3 +136,42 @@ def test_a_bare_name_binds_only_to_its_own_package(tmp_path: Path) -> None:
         for targets in by_caller.values()
         for dst in targets
     ), by_caller
+
+
+def test_a_dot_imported_struct_and_a_shadowing_local_type_resolve(
+    tmp_path: Path,
+) -> None:
+    # Two shapes from review (#1747): a bare `Error{}` after `import . "proj/m"`
+    # names m's struct, and a function-local `type Name struct{}` shadows the
+    # package-level one for a literal in that file.
+    root = tmp_path / "proj"
+    (root / "m").mkdir(parents=True)
+    (root / "dot").mkdir()
+    (root / "go.mod").write_text("module proj\n\ngo 1.22\n", encoding="utf-8")
+    (root / "m" / "types.go").write_text(TYPES_GO, encoding="utf-8")
+    (root / "dot" / "use.go").write_text(
+        'package dot\n\nimport . "proj/m"\n\n'
+        'func viaDot() *Error { return &Error{Msg: "d"} }\n',
+        encoding="utf-8",
+    )
+    (root / "m" / "shadow.go").write_text(
+        "package m\n\ntype Local struct{}\n\nfunc pkgLevel() Local { return Local{} }\n",
+        encoding="utf-8",
+    )
+    (root / "m" / "inner.go").write_text(
+        "package m\n\nfunc withLocal() any {\n\ttype Local struct{ V int }\n"
+        "\treturn Local{V: 1}\n}\n",
+        encoding="utf-8",
+    )
+    store = _index(root)
+
+    by_caller = _instantiates(store)
+    assert by_caller.get("viaDot") == {"proj.m.types.Error"}, by_caller.get("viaDot")
+    # The package-level literal in shadow.go names shadow.go's Local; the
+    # literal inside withLocal names inner.go's local Local, not shadow.go's.
+    assert by_caller.get("pkgLevel") == {"proj.m.shadow.Local"}, by_caller.get(
+        "pkgLevel"
+    )
+    targets = by_caller.get("withLocal")
+    assert targets is not None and len(targets) == 1, targets
+    assert next(iter(targets)).startswith("proj.m.inner."), targets

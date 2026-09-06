@@ -5231,15 +5231,38 @@ class CallProcessor:
         resolve to nothing rather than a guess.
         """
         package_alias, _, name = type_name.rpartition(cs.SEPARATOR_DOT)
+        import_map = self._resolver.import_processor.import_mapping.get(module_qn) or {}
         if package_alias:
-            import_map = (
-                self._resolver.import_processor.import_mapping.get(module_qn) or {}
-            )
-            package_qn = import_map.get(package_alias)
+            packages = [import_map.get(package_alias)]
         else:
-            package_qn = module_qn.rpartition(cs.SEPARATOR_DOT)[0]
-        if not package_qn:
-            return None
+            # Own package first; a bare name can also be an exported type of a
+            # DOT-imported package (`import . "proj/m"`), which the import
+            # pass records under a `.`-prefixed key (#1747 review).
+            packages = [module_qn.rpartition(cs.SEPARATOR_DOT)[0]] + [
+                path
+                for key, path in import_map.items()
+                if key.startswith(cs.SEPARATOR_DOT)
+            ]
+        for package_qn in packages:
+            if not package_qn:
+                continue
+            found = self._go_class_in_package(package_qn, name, module_qn)
+            if found is not None:
+                return found
+        return None
+
+    def _go_class_in_package(
+        self, package_qn: str, name: str, module_qn: str
+    ) -> str | None:
+        """The one Class `name` declared directly under a file of `package_qn`.
+
+        Two files of the package declaring the same name is Go's own error;
+        the shape that does occur is a function-local type shadowing a
+        package-level one, which the registry also files directly under the
+        declaring module. The one declared in THIS file wins then, because a
+        local type is what a bare literal in that file names (#1747 review).
+        Anything still ambiguous resolves to nothing rather than a guess.
+        """
         registry = self._resolver.function_registry
         depth = package_qn.count(cs.SEPARATOR_DOT) + 2
         candidates = [
@@ -5248,6 +5271,13 @@ class CallProcessor:
             if registry.get(qn) == NodeType.CLASS
             and qn.count(cs.SEPARATOR_DOT) == depth
         ]
+        if len(candidates) > 1:
+            own = [
+                qn
+                for qn in candidates
+                if qn.startswith(f"{module_qn}{cs.SEPARATOR_DOT}")
+            ]
+            candidates = own if own else candidates
         return candidates[0] if len(candidates) == 1 else None
 
     def _ingest_go_composite_function_references(
