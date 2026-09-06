@@ -44,10 +44,10 @@ PROJECT_ROOT = Path(__file__).resolve().parent.parent
 # preserves main's behaviour rather than adding to it: main's `\*\*:` already
 # rejects a later-bold theme, and the alternation keeps that. A looser
 # `:?\*\*:?` would instead let the theme group end at a LATER bold, so
-# "- **Improvements** to **CI automation**: ..." captures theme="Improvements"
-# and leaves "CI automation" in the body, where is_feature_theme never
-# inspects it - a CI entry then reaches Latest News, which is the one thing
-# this module exists to prevent.
+# "- **Improvements** to **CI automation**: ..." would capture
+# theme="Improvements" and leave "CI automation" in the body. The anchoring
+# keeps the theme stable for dedup and normalisation; a bold left in the body
+# is separately rejected by body_themes_are_features (issue #1608).
 # The separator is ` *`, not ` +`, so a bullet with no space after the colon
 # parses here exactly as it does in HIGHLIGHT_BULLET below. The two disagreed
 # until #1609: this pattern rejected it while HIGHLIGHT_BULLET accepted it, so
@@ -116,6 +116,34 @@ def is_feature_theme(theme: str) -> bool:
     return NON_FEATURE_THEME.search(theme) is None
 
 
+BODY_THEME = re.compile(r"\*\*(?P<theme>[^*]+?)\*\*")
+# Inline code is not prose: two `**kwargs`-style tokens would otherwise pair
+# up into a pseudo-bold whose "theme" is the text between them. A span opens
+# with a run of backticks and closes with a run of the SAME length, so
+# ``**CI**`` (a double-backtick span) is one span, not two empty ones with a
+# bold left between them (#1748 review).
+CODE_SPAN = re.compile(r"(?P<delimiter>`+).*?(?P=delimiter)")
+
+
+def body_themes_are_features(text: str) -> bool:
+    """True when every bold span in a bullet's BODY passes `is_feature_theme`.
+
+    The filter used to read the theme and nothing else, so a generator that
+    wrote "**Improvements**: to **CI automation**: ..." put its real subject in
+    a second bold the filter never saw, and CI content reached the README
+    (issue #1608). A bold in the body is a theme in all but position, so it is
+    held to the theme's rule. Plain prose is NOT: a feature entry legitimately
+    says "the test suite", "type-test patterns", "this release" or "a benchmark
+    harness" in passing (four current NEWS.md entries do), and rejecting on
+    those words would drop the features this filter exists to keep. Code spans
+    are stripped first, so `**kwargs` in backticks cannot open a bold.
+    """
+    prose = CODE_SPAN.sub("", text)
+    return all(
+        is_feature_theme(match.group("theme")) for match in BODY_THEME.finditer(prose)
+    )
+
+
 def _normalize_dashes(text: str) -> str:
     """Replace em-dashes and en-dashes with a hyphen; house style forbids them.
 
@@ -129,8 +157,9 @@ def _normalize_dashes(text: str) -> str:
 def extract_bullets(fragment: str) -> list[str]:
     """Return the well-formed, feature-themed news bullets in a fragment.
 
-    A bullet must match the NEWS.md entry format AND name a product feature;
-    non-feature themes (CI/devx/release/bug/etc.) are discarded here so neither
+    A bullet must match the NEWS.md entry format AND name a product feature,
+    in its theme and in any bold the body carries (issue #1608); non-feature
+    themes (CI/devx/release/bug/etc.) are discarded here so neither
     the count cap nor the dedup downstream ever considers them. Highlights-style
     `* ` bullets are accepted and normalised to the NEWS.md `- ` marker, as
     is a colon inside the bold theme (`**Theme:**`), which the generator
@@ -142,7 +171,11 @@ def extract_bullets(fragment: str) -> list[str]:
         if stripped.startswith("* "):
             stripped = f"- {stripped[2:]}"
         match = BULLET_PATTERN.match(stripped)
-        if match and is_feature_theme(match.group("theme")):
+        if (
+            match
+            and is_feature_theme(match.group("theme"))
+            and body_themes_are_features(match.group("text"))
+        ):
             theme = match.group("theme").strip()
             bullets.append(f"- **{theme}**: {match.group('text')}")
     return bullets

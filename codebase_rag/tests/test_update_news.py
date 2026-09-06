@@ -10,6 +10,7 @@ from scripts.update_news import (
     BULLET_PATTERN,
     HIGHLIGHT_BULLET,
     LATEST_RELEASE_MARKER,
+    body_themes_are_features,
     create_aggregated_bullet,
     existing_themes,
     extract_all_highlights,
@@ -109,34 +110,46 @@ class TestExtractBullets:
             "- **Web Search**: the agent searches.",
         ]
 
-    def test_the_filter_inspects_the_theme_only_which_a_later_bold_exploits(
-        self,
-    ) -> None:
-        """Pins a PRE-EXISTING limit, widened but not created by this change.
+    def test_a_non_feature_bold_in_the_body_is_rejected_like_a_theme(self) -> None:
+        """Closes the hole the previous version of this test pinned (issue #1608).
 
-        `is_feature_theme` is passed the theme and nothing else, so a
-        non-feature word living in the BODY is never inspected. On main
-        (colon outside the bold only) this already admits
-        "- **Improvements**: to **CI automation**: ..."; accepting the
-        colon-inside spelling necessarily admits its twin. Anchoring the
-        colon to the FIRST bold is what stops the theme group itself from
-        running past a later bold; main already does that and this change
-        preserves it, so the anchoring is load-bearing but not new here.
-
-        The residual hole is the filter's input, not the pattern, and
-        closing it means inspecting the body too - a behaviour change to
-        what counts as a feature entry, out of scope here.
+        `is_feature_theme` was passed the theme and nothing else, so a
+        non-feature word in a SECOND bold in the body was never inspected:
+        "- **Improvements**: to **CI automation**: ..." carried CI content into
+        the README. A bold in the body is a theme in all but position and is
+        now held to the same rule. Prose is deliberately not: four current
+        NEWS.md entries say "test suite", "type-test patterns", "this release"
+        or "benchmark" in passing and must keep passing; nor is inline code,
+        where two `**kwargs`-style tokens would otherwise pair into a bold.
         """
-        # Preserved by this change, also [] on main: the theme group cannot
-        # end at a LATER bold.
+        # The theme group cannot end at a LATER bold (anchored to the first).
         assert extract_bullets("- **Improvements** to **CI automation**: x.") == []
         assert extract_bullets("* **Improvements** to **CI automation**: x.") == []
-        # Not fixed, and equally true before it: a colon directly after the
-        # first bold makes everything else a body the filter never reads.
-        leaked = extract_bullets("- **Improvements**: to **CI automation**: x.")
-        assert leaked == ["- **Improvements**: to **CI automation**: x."]
+        # The colon-after-first-bold twin, which used to leak.
+        assert extract_bullets("- **Improvements**: to **CI automation**: x.") == []
+        assert extract_bullets("* **Improvements:** to **CI automation**: x.") == []
+        # A feature-named bold in the body is fine.
+        assert extract_bullets("- **Improvements**: to **Web Search** ranking.") == [
+            "- **Improvements**: to **Web Search** ranking."
+        ]
+        # Prose mentions of non-feature words are not themes and stay.
+        prose = (
+            "- **Runtime Call Tracing**: runs your code (typically the test suite) "
+            "and merges the calls, handling type-test patterns; this release "
+            "adds a benchmark harness."
+        )
+        assert extract_bullets(prose) == [prose]
+        code = "- **Python Taint**: follows `**kwargs` through tests and `**args` too."
+        assert extract_bullets(code) == [code]
+        # A double-backtick span is one span; stripping backtick pairs
+        # separately would leave `**CI**` behind as a bold (#1748 review).
+        double = "- **Web Search**: renders ``**CI**`` literally in results."
+        assert extract_bullets(double) == [double]
+        assert body_themes_are_features("``**docs**`` shown as code") is True
         assert is_feature_theme("Improvements") is True
         assert is_feature_theme("CI automation") is False
+        assert body_themes_are_features("plain tests and docs in prose") is True
+        assert body_themes_are_features("see **docs** for more") is False
 
     def test_both_extractors_accept_a_missing_space_after_the_colon(self) -> None:
         """The unification issue #1609 asked for, in the permissive direction.
