@@ -682,6 +682,99 @@ def _site_scoped[**P, R](fn: Callable[P, R]) -> Callable[P, R]:
     return wrapper
 
 
+_GO_SCOPE_TYPES = frozenset(
+    {
+        cs.TS_GO_FUNCTION_DECLARATION,
+        cs.TS_GO_METHOD_DECLARATION,
+        cs.TS_GO_FUNC_LITERAL,
+    }
+)
+# Each is an implicit block for a declaration inside it: a `case` clause's
+# body is its own scope without braces, so a type declared under `case 0:`
+# is invisible to the `default:` arm (#1747 review).
+_GO_BLOCK_TYPES = frozenset(
+    {
+        cs.TS_GO_BLOCK,
+        cs.TS_GO_EXPRESSION_CASE,
+        cs.TS_GO_TYPE_CASE,
+        cs.TS_GO_COMMUNICATION_CASE,
+        cs.TS_GO_DEFAULT_CASE,
+    }
+)
+_Point = tuple[int, int]
+_Span = tuple[_Point, _Point]
+
+
+def _go_innermost_block_end(node: Node, block_end: _Point | None) -> _Point | None:
+    """The innermost block end in force below `node`: its own end for a
+    function, or for a block-like node already inside one; else inherited."""
+    if node.type in _GO_SCOPE_TYPES or (
+        block_end is not None and node.type in _GO_BLOCK_TYPES
+    ):
+        return (node.end_point.row, node.end_point.column)
+    return block_end
+
+
+def _go_type_spec_start(node: Node, name: str) -> _Point | None:
+    """The start point of `node` when it is a `type_spec` declaring `name`."""
+    if node.type != cs.TS_GO_TYPE_SPEC:
+        return None
+    spec_name = node.child_by_field_name(cs.FIELD_NAME)
+    if spec_name is None or safe_decode_text(spec_name) != name:
+        return None
+    return (node.start_point.row, node.start_point.column)
+
+
+def _go_variant_spans(
+    variants: list[str], declarations: list[tuple[int, _Span | None]]
+) -> list[_Span | None] | None:
+    """One visible span (None for package level) per registry variant.
+
+    The natural qn is the first declaration in document order; a `@line`
+    variant names its declaration by line. None when the two cannot be put
+    in correspondence, which keeps the caller's fan-out.
+    """
+    if len(declarations) != len(variants):
+        return None
+    by_line = dict(declarations)
+    spans: list[_Span | None] = []
+    for index, variant in enumerate(variants):
+        marker = variant.rsplit(cs.SEPARATOR_DOT, 1)[-1]
+        if cs.DUP_QN_MARKER not in marker:
+            if index != 0:
+                return None
+            spans.append(declarations[0][1])
+            continue
+        suffix = marker.split(cs.DUP_QN_MARKER, 1)[1]
+        line_text = suffix.split(cs.DUP_QN_COLUMN_MARKER, 1)[0]
+        if not line_text.isdigit() or int(line_text) not in by_line:
+            return None
+        spans.append(by_line[int(line_text)])
+    return spans
+
+
+def _go_composite_type_name(type_node: Node | None) -> str | None:
+    """The type a Go composite literal constructs, as written: `Error`, `pkg.Error`.
+
+    A `generic_type` (`Box[int]{...}`) constructs its base type. Anything
+    else -- a slice, map, array or struct type literal -- is a container or
+    an anonymous type and has no class to instantiate.
+    """
+    if type_node is None:
+        return None
+    if type_node.type == cs.TS_GO_GENERIC_TYPE:
+        return _go_composite_type_name(type_node.child_by_field_name(cs.FIELD_TYPE))
+    if type_node.type == cs.TS_GO_TYPE_IDENTIFIER:
+        return safe_decode_text(type_node)
+    if type_node.type == cs.TS_GO_QUALIFIED_TYPE:
+        package = type_node.child_by_field_name(cs.FIELD_GO_PACKAGE)
+        name = type_node.child_by_field_name(cs.FIELD_NAME)
+        if package is None or name is None:
+            return None
+        return f"{safe_decode_text(package)}{cs.SEPARATOR_DOT}{safe_decode_text(name)}"
+    return None
+
+
 class _JsFileBindingCollector:
     """Whole-file binding index for the #988 receiver resolution.
 
@@ -1720,6 +1813,13 @@ class CallProcessor:
                     module_qn,
                     None,
                     None,
+                    self._flow_scope_boundaries(queries[language][cs.QUERY_CONFIG]),
+                )
+                # A module-scope `var e = &Error{}` constructs too (issue #1642).
+                self._ingest_go_composite_literal_instantiations(
+                    root_node,
+                    (cs.NodeLabel.MODULE, cs.KEY_QUALIFIED_NAME, module_qn),
+                    module_qn,
                     self._flow_scope_boundaries(queries[language][cs.QUERY_CONFIG]),
                 )
                 # A module-scope Go var bound to a bare function value
@@ -3221,6 +3321,12 @@ class CallProcessor:
                 module_qn,
                 local_var_types,
                 class_context,
+                self._flow_scope_boundaries(queries[language][cs.QUERY_CONFIG]),
+            )
+            self._ingest_go_composite_literal_instantiations(
+                caller_node,
+                caller_spec,
+                module_qn,
                 self._flow_scope_boundaries(queries[language][cs.QUERY_CONFIG]),
             )
         if language == cs.SupportedLanguage.CPP:
@@ -5155,6 +5261,234 @@ class CallProcessor:
         return name.replace(cs.SEPARATOR_DOUBLE_COLON, cs.SEPARATOR_DOT) or None
 
     @_site_scoped
+    def _ingest_go_composite_literal_instantiations(
+        self,
+        caller_node: Node,
+        caller_spec: tuple[str, str, str],
+        module_qn: str,
+        boundary_types: frozenset[str],
+    ) -> None:
+        # `Error{...}` and `&Error{...}` are how Go constructs a struct: there
+        # is no constructor call, so the call pass never saw a construction
+        # and no Go program produced an INSTANTIATES edge (issue #1642). The
+        # composite literal is the construction site. Only a literal whose
+        # `type` names a type is one: a slice, map or array literal builds a
+        # container, and its element literals carry no type of their own.
+        # Revive-only, like the C++ braced-return pass: nothing is emitted
+        # unless the type resolves to a registered first-party Class.
+        registry = self._resolver.function_registry
+        ensure_rel = self._emit_rel
+        stack: list[Node] = list(caller_node.children)
+        while stack:
+            node = stack.pop()
+            if node.type in boundary_types:
+                continue
+            stack.extend(node.children)
+            if node.type != cs.TS_GO_COMPOSITE_LITERAL:
+                continue
+            type_name = _go_composite_type_name(node.child_by_field_name(cs.FIELD_TYPE))
+            if not type_name:
+                continue
+            class_qn = self._go_struct_class(type_name, module_qn)
+            if class_qn is None:
+                continue
+            self._site_node = node
+            for class_variant in self._go_visible_class_variants(
+                class_qn, module_qn, node
+            ):
+                if registry.get(class_variant) != NodeType.CLASS:
+                    continue
+                ensure_rel(
+                    caller_spec,
+                    cs.RelationshipType.INSTANTIATES,
+                    (cs.NodeLabel.CLASS, cs.KEY_QUALIFIED_NAME, class_variant),
+                )
+
+    def _go_struct_class(self, type_name: str, module_qn: str) -> str | None:
+        """The registered Class a Go composite literal's type names, or None.
+
+        Go types are PACKAGE-scoped: a bare `Name` can only be a type declared
+        in the literal's own package (the files beside it), and `pkg.Name` one
+        declared in the package the import map binds `pkg` to. Types are
+        registered under the FILE that declares them (`proj.m.types.Error`),
+        so the lookup crosses the file segment the source never names.
+
+        Deliberately not `_resolve_class_name`: its last step is a repo-wide
+        search by simple name, which bound `Error{}` in package `m` to a
+        same-named struct in package `a`, or to a Python `class Error`, and
+        dead-code then revived the wrong type while reporting the constructed
+        one dead (#1642 review). The one Class named `Name` directly under a
+        file of the right package is the answer; two candidates, or none,
+        resolve to nothing rather than a guess.
+        """
+        package_alias, _, name = type_name.rpartition(cs.SEPARATOR_DOT)
+        import_map = self._resolver.import_processor.import_mapping.get(module_qn) or {}
+        if package_alias:
+            packages = [import_map.get(package_alias)]
+        else:
+            # Own package first; a bare name can also be an exported type of a
+            # DOT-imported package (`import . "proj/m"`), which the import
+            # pass records under a `.`-prefixed key (#1747 review).
+            packages = [module_qn.rpartition(cs.SEPARATOR_DOT)[0]] + [
+                path
+                for key, path in import_map.items()
+                if key.startswith(cs.SEPARATOR_DOT)
+            ]
+        for package_qn in packages:
+            if not package_qn:
+                continue
+            found = self._go_class_in_package(package_qn, name, module_qn)
+            if found is not None:
+                return found
+        return None
+
+    def _go_class_in_package(
+        self, package_qn: str, name: str, module_qn: str
+    ) -> str | None:
+        """The one Class `name` declared directly under a file of `package_qn`.
+
+        Two files of the package declaring the same name is Go's own error;
+        the shape that does occur is a function-local type shadowing a
+        package-level one, which the registry also files directly under the
+        declaring module. The one declared in THIS file wins then, because a
+        local type is what a bare literal in that file names (#1747 review).
+        Anything still ambiguous resolves to nothing rather than a guess.
+        """
+        registry = self._resolver.function_registry
+        depth = package_qn.count(cs.SEPARATOR_DOT) + 2
+        candidates = [
+            qn
+            for qn in registry.find_with_prefix_and_suffix(package_qn, name)
+            if registry.get(qn) == NodeType.CLASS
+            and qn.count(cs.SEPARATOR_DOT) == depth
+            and self._go_declaration_is_visible(
+                qn.rpartition(cs.SEPARATOR_DOT)[0], package_qn, module_qn
+            )
+        ]
+        if len(candidates) > 1:
+            own = [
+                qn
+                for qn in candidates
+                if qn.startswith(f"{module_qn}{cs.SEPARATOR_DOT}")
+            ]
+            candidates = own if own else candidates
+        return candidates[0] if len(candidates) == 1 else None
+
+    def _go_declaration_is_visible(
+        self, declaring_qn: str, package_qn: str, module_qn: str
+    ) -> bool:
+        """Whether a type declared in `declaring_qn` is in scope for `module_qn`.
+
+        A directory is not a package: `package m_test` files sit beside
+        `package m` files and are a DIFFERENT package, and any `_test.go` is
+        compiled only under `go test`. Without this filter a production
+        `Error{}` in a third file of the package saw both `types.Error` and a
+        same-named `Error` from `m_test.go`, and the ambiguity rule emitted
+        nothing (CodeRabbit, #1747). Same rules as `_go_package_receiver_qn`:
+        a test file is visible only to a test requester of the same package,
+        and within the requester's own directory the `package` clauses must
+        agree. A lookup through an import is into ANOTHER package, whose
+        clause the requester does not share, so only the test rule applies.
+        """
+        declaring_path = self.module_qn_to_file_path.get(declaring_qn)
+        if declaring_path is None:
+            return True
+        requester = self.module_qn_to_file_path.get(module_qn)
+        requester_is_test = requester is not None and requester.stem.endswith(
+            cs.GO_TEST_FILE_SUFFIX
+        )
+        own_package = package_qn == module_qn.rpartition(cs.SEPARATOR_DOT)[0]
+        if declaring_path.stem.endswith(cs.GO_TEST_FILE_SUFFIX) and not (
+            requester_is_test and own_package
+        ):
+            return False
+        if not own_package:
+            return True
+        requester_package = self._go_package_names.get(module_qn)
+        return (
+            requester_package is None
+            or self._go_package_names.get(declaring_qn) == requester_package
+        )
+
+    def _go_visible_class_variants(
+        self, class_qn: str, module_qn: str, literal: Node
+    ) -> list[str]:
+        """The registry variants of `class_qn` that `literal` can name.
+
+        One file declaring `Local` at package level and again inside a
+        function registers both under one qn, the second as a `@line`
+        variant, and a literal fanned out to both. Go scoping says a local
+        type is visible from its declaration to the end of its innermost
+        block and shadows the package-level twin there; a literal before the
+        declaration, or outside the nested block that holds it, names the
+        package type (CodeRabbit and #1747 review). So choose by position
+        against that span. Any shape this cannot settle keeps the fan-out.
+        """
+        variants = self._resolver.function_registry.variants(class_qn)
+        if len(variants) < 2 or not class_qn.startswith(
+            f"{module_qn}{cs.SEPARATOR_DOT}"
+        ):
+            return variants
+        name = class_qn.rsplit(cs.SEPARATOR_DOT, 1)[-1]
+        declarations = self._go_type_declaration_scopes(module_qn, name)
+        spans = _go_variant_spans(variants, declarations)
+        if spans is None:
+            return variants
+        # A point, not a row: `x := Local{}; type Local struct{}` on one line
+        # puts the literal BEFORE the declaration, and rows alone attributed
+        # it to the later local type (#1747 review).
+        point: _Point = (literal.start_point.row, literal.start_point.column)
+        local = [
+            variant
+            for variant, span in zip(variants, spans, strict=True)
+            if span is not None and span[0] <= point <= span[1]
+        ]
+        package_level = [
+            variant
+            for variant, span in zip(variants, spans, strict=True)
+            if span is None
+        ]
+        if len(local) == 1:
+            return local
+        if not local and len(package_level) == 1:
+            return package_level
+        return variants
+
+    def _go_type_declaration_scopes(
+        self, module_qn: str, name: str
+    ) -> list[tuple[int, _Span | None]]:
+        """(1-based line, visible span or None) per `type name` declaration.
+
+        The span of a function-local declaration runs from the declaration's
+        own (row, column) to the end of its innermost enclosing block: a bare
+        `{ }` block, a loop or branch body, a `case` clause's implicit body,
+        or the function body itself, which is where Go makes it visible.
+        None marks a package-level declaration, visible everywhere in the
+        file. In document order, which is the order the definition pass
+        registered them in, so the first is the natural qn and the rest are
+        variants named by their line.
+        """
+        type_inference = self._resolver.type_inference
+        file_path = type_inference.module_qn_to_file_path.get(module_qn)
+        if file_path is None or not (entry := type_inference.ast_cache.load(file_path)):
+            return []
+        root_node, _ = entry
+        found: list[tuple[int, _Span | None]] = []
+        # The second item is the end point of the innermost block, or None
+        # above every function.
+        stack: list[tuple[Node, _Point | None]] = [(root_node, None)]
+        while stack:
+            node, block_end = stack.pop()
+            block_end = _go_innermost_block_end(node, block_end)
+            start = _go_type_spec_start(node, name)
+            if start is not None:
+                found.append(
+                    (start[0] + 1, None if block_end is None else (start, block_end))
+                )
+            stack.extend((child, block_end) for child in node.children)
+        found.sort(key=lambda item: item[0])
+        return found
+
     def _ingest_go_composite_function_references(
         self,
         caller_node: Node,
