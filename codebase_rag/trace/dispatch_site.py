@@ -168,7 +168,7 @@ def _unparenthesised(func: Node | None) -> Node | None:
     recorded as the site (#1543 review).
     """
     while func is not None and func.type == cs.TS_PARENTHESIZED_EXPRESSION:
-        func = next((c for c in func.named_children), None)
+        func = next(iter(func.named_children), None)
     return func
 
 
