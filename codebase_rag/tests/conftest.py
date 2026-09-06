@@ -632,8 +632,19 @@ def force_mtime_after_cache(repo: Path, source: Path) -> None:
     otherwise is whatever the preceding run happened to cost.
     """
     cache_mtime = (repo / rag_cs.HASH_CACHE_FILENAME).stat().st_mtime
+    # Read back and advance until the STORED stamp is strictly later: a
+    # filesystem with coarse mtime resolution can round the requested value
+    # onto the cache's own tick, which is the collision this exists to
+    # remove (CodeRabbit, #1743).
     stamp = cache_mtime + 1.0
-    os.utime(source, (stamp, stamp))
+    for _ in range(8):
+        os.utime(source, (stamp, stamp))
+        if source.stat().st_mtime > cache_mtime:
+            return
+        stamp += 1.0
+    raise AssertionError(
+        f"could not stamp {source} later than the hash cache ({cache_mtime})"
+    )
 
 
 def git_env(**overrides: str) -> dict[str, str]:
