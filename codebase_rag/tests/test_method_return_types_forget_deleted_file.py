@@ -122,3 +122,28 @@ def test_a_reparse_records_the_new_return_type(temp_repo: Path) -> None:
     updater.run()
 
     assert recorded.get("proj.pkg.types.A.Clone") == "B", recorded
+
+
+def test_an_entry_whose_registry_row_is_already_gone_is_still_forgotten(
+    temp_repo: Path,
+) -> None:
+    """Ownership comes from the span records, not the registry sweep.
+
+    A receiver method is keyed under `types.go`, so no prefix of
+    `methods.go` matches it, and with its registry row already removed it
+    never enters the sweep's removal set either. Only the span record that
+    names `methods.go` as the registering module can still find it (#1752
+    review).
+    """
+    root = temp_repo / "proj"
+    updater = _project(root)
+    recorded = updater.factory.type_inference.method_return_types
+    del updater.function_registry["proj.pkg.types.A.Clone"]
+
+    (root / "pkg" / "methods.go").unlink()
+    updater.remove_file_from_state(root / "pkg" / "methods.go")
+
+    assert "proj.pkg.types.A.Clone" not in recorded, (
+        f"the orphaned entry outlived its registry row and its file: {recorded}"
+    )
+    assert recorded.get("proj.pkg.types.B.Twin") == "B", recorded

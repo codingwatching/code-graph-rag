@@ -2713,20 +2713,25 @@ class GraphUpdater:
         # and Go receiver methods record their return type under the
         # definition's qn, and this sweep never reached it. A Go method is
         # keyed by its RECEIVER's module, so its qn can sit under a prefix this
-        # file does not own; `qns_to_remove` already carries the span-record
-        # ownership that catches it, and the prefix filter covers an entry
-        # whose registry row is already gone.
+        # file does not own. Ownership therefore comes from the SPAN records
+        # (`owned_qns`), not from the registry sweep alone: a receiver method
+        # whose registry row is already gone never enters `qns_to_remove`,
+        # and no prefix of the declaring file matches it, so its return type
+        # outlived both (#1752 review). The prefix arm covers an entry filed
+        # under this file's own module; `foreign_qns` protects a qn another
+        # file still owns, exactly as it does for the registry.
         method_return_types = self.factory.type_inference.method_return_types
         stale_method_qns = [
             qn
             for qn in method_return_types
-            if qn in qns_to_remove
-            or (
-                any(
+            if qn not in foreign_qns
+            and (
+                qn in qns_to_remove
+                or qn in owned_qns
+                or any(
                     qn.startswith(f"{prefix}.") or qn == prefix
                     for prefix in module_qn_prefixes
                 )
-                and qn not in foreign_qns
             )
         ]
         if stale_method_qns:
