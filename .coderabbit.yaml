@@ -1,0 +1,12 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+#
+# The docstring-coverage pre-merge check is off (issue #1617). The pull request
+# template requires "No new comments or docstrings (code should be
+# self-documenting)", and test functions here carry none by convention, so the
+# default 80% threshold warned on every PR that touched a test and could not be
+# cleared without breaking the template. One class of warning that is routinely
+# declined weakens the rule that every bot finding is cleared before merge.
+reviews:
+  pre_merge_checks:
+    docstrings:
+      mode: "off"
