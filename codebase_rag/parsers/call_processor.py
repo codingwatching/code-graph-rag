@@ -702,6 +702,55 @@ _GO_BLOCK_TYPES = frozenset(
     }
 )
 _Point = tuple[int, int]
+_Span = tuple[_Point, _Point]
+
+
+def _go_innermost_block_end(node: Node, block_end: _Point | None) -> _Point | None:
+    """The innermost block end in force below `node`: its own end for a
+    function, or for a block-like node already inside one; else inherited."""
+    if node.type in _GO_SCOPE_TYPES or (
+        block_end is not None and node.type in _GO_BLOCK_TYPES
+    ):
+        return (node.end_point.row, node.end_point.column)
+    return block_end
+
+
+def _go_type_spec_start(node: Node, name: str) -> _Point | None:
+    """The start point of `node` when it is a `type_spec` declaring `name`."""
+    if node.type != cs.TS_GO_TYPE_SPEC:
+        return None
+    spec_name = node.child_by_field_name(cs.FIELD_NAME)
+    if spec_name is None or safe_decode_text(spec_name) != name:
+        return None
+    return (node.start_point.row, node.start_point.column)
+
+
+def _go_variant_spans(
+    variants: list[str], declarations: list[tuple[int, _Span | None]]
+) -> list[_Span | None] | None:
+    """One visible span (None for package level) per registry variant.
+
+    The natural qn is the first declaration in document order; a `@line`
+    variant names its declaration by line. None when the two cannot be put
+    in correspondence, which keeps the caller's fan-out.
+    """
+    if len(declarations) != len(variants):
+        return None
+    by_line = dict(declarations)
+    spans: list[_Span | None] = []
+    for index, variant in enumerate(variants):
+        marker = variant.rsplit(cs.SEPARATOR_DOT, 1)[-1]
+        if cs.DUP_QN_MARKER not in marker:
+            if index != 0:
+                return None
+            spans.append(declarations[0][1])
+            continue
+        suffix = marker.split(cs.DUP_QN_MARKER, 1)[1]
+        line_text = suffix.split(cs.DUP_QN_COLUMN_MARKER, 1)[0]
+        if not line_text.isdigit() or int(line_text) not in by_line:
+            return None
+        spans.append(by_line[int(line_text)])
+    return spans
 
 
 def _go_composite_type_name(type_node: Node | None) -> str | None:
@@ -5364,31 +5413,23 @@ class CallProcessor:
             return variants
         name = class_qn.rsplit(cs.SEPARATOR_DOT, 1)[-1]
         declarations = self._go_type_declaration_scopes(module_qn, name)
-        if len(declarations) != len(variants):
+        spans = _go_variant_spans(variants, declarations)
+        if spans is None:
             return variants
-        by_line = {line: span for line, span in declarations}
         # A point, not a row: `x := Local{}; type Local struct{}` on one line
         # puts the literal BEFORE the declaration, and rows alone attributed
         # it to the later local type (#1747 review).
         point: _Point = (literal.start_point.row, literal.start_point.column)
-        package_level: list[str] = []
-        local: list[str] = []
-        for index, variant in enumerate(variants):
-            marker = variant.rsplit(cs.SEPARATOR_DOT, 1)[-1]
-            if cs.DUP_QN_MARKER in marker:
-                suffix = marker.split(cs.DUP_QN_MARKER, 1)[1]
-                line_text = suffix.split(cs.DUP_QN_COLUMN_MARKER, 1)[0]
-                if not line_text.isdigit() or int(line_text) not in by_line:
-                    return variants
-                span = by_line[int(line_text)]
-            else:
-                if index != 0:
-                    return variants
-                span = declarations[0][1]
-            if span is None:
-                package_level.append(variant)
-            elif span[0] <= point <= span[1]:
-                local.append(variant)
+        local = [
+            variant
+            for variant, span in zip(variants, spans, strict=True)
+            if span is not None and span[0] <= point <= span[1]
+        ]
+        package_level = [
+            variant
+            for variant, span in zip(variants, spans, strict=True)
+            if span is None
+        ]
         if len(local) == 1:
             return local
         if not local and len(package_level) == 1:
@@ -5397,7 +5438,7 @@ class CallProcessor:
 
     def _go_type_declaration_scopes(
         self, module_qn: str, name: str
-    ) -> list[tuple[int, tuple[_Point, _Point] | None]]:
+    ) -> list[tuple[int, _Span | None]]:
         """(1-based line, visible span or None) per `type name` declaration.
 
         The span of a function-local declaration runs from the declaration's
@@ -5414,26 +5455,18 @@ class CallProcessor:
         if file_path is None or not (entry := type_inference.ast_cache.load(file_path)):
             return []
         root_node, _ = entry
-        found: list[tuple[int, tuple[_Point, _Point] | None]] = []
+        found: list[tuple[int, _Span | None]] = []
         # The second item is the end point of the innermost block, or None
         # above every function.
         stack: list[tuple[Node, _Point | None]] = [(root_node, None)]
         while stack:
             node, block_end = stack.pop()
-            if node.type in _GO_SCOPE_TYPES or (
-                block_end is not None and node.type in _GO_BLOCK_TYPES
-            ):
-                block_end = (node.end_point.row, node.end_point.column)
-            if node.type == cs.TS_GO_TYPE_SPEC:
-                spec_name = node.child_by_field_name(cs.FIELD_NAME)
-                if spec_name is not None and safe_decode_text(spec_name) == name:
-                    start: _Point = (node.start_point.row, node.start_point.column)
-                    found.append(
-                        (
-                            start[0] + 1,
-                            None if block_end is None else (start, block_end),
-                        )
-                    )
+            block_end = _go_innermost_block_end(node, block_end)
+            start = _go_type_spec_start(node, name)
+            if start is not None:
+                found.append(
+                    (start[0] + 1, None if block_end is None else (start, block_end))
+                )
             stack.extend((child, block_end) for child in node.children)
         found.sort(key=lambda item: item[0])
         return found
