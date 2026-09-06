@@ -37,22 +37,34 @@ def _csharp_base_written_name(node: Node) -> str | None:
     # qualified_name (`System.Exception`), or a record positional base
     # unwrapped to its type. predefined_type (an enum's underlying type) and
     # punctuation (`:`, `,`) yield None so they are dropped.
-    if node.type == cs.TS_CSHARP_IDENTIFIER and node.text:
-        return safe_decode_text(node)
-    if node.type == cs.TS_CSHARP_GENERIC_NAME:
-        ident = find_child_by_type(node, cs.TS_CSHARP_IDENTIFIER)
-        return safe_decode_text(ident) if ident and ident.text else None
-    if node.type == cs.TS_CSHARP_QUALIFIED_NAME and node.text:
-        # A qualified generic base (`System.Collections.Generic.List<int>`)
-        # is one qualified_name whose text carries the type arguments; strip
-        # them so the written name matches the registered, generic-free qn.
-        text = safe_decode_text(node)
-        return text.split(cs.CHAR_ANGLE_OPEN, 1)[0] if text else None
-    if node.type == cs.TS_CSHARP_PRIMARY_CONSTRUCTOR_BASE_TYPE:
-        for child in node.children:
-            if name := _csharp_base_written_name(child):
-                return name
+    match node.type:
+        case cs.TS_CSHARP_IDENTIFIER:
+            return safe_decode_text(node) if node.text else None
+        case cs.TS_CSHARP_GENERIC_NAME:
+            ident = find_child_by_type(node, cs.TS_CSHARP_IDENTIFIER)
+            return safe_decode_text(ident) if ident and ident.text else None
+        case cs.TS_CSHARP_QUALIFIED_NAME:
+            return _csharp_qualified_base_name(node)
+        case cs.TS_CSHARP_PRIMARY_CONSTRUCTOR_BASE_TYPE:
+            return next(
+                (
+                    name
+                    for child in node.children
+                    if (name := _csharp_base_written_name(child))
+                ),
+                None,
+            )
     return None
+
+
+def _csharp_qualified_base_name(node: Node) -> str | None:
+    # A qualified generic base (`System.Collections.Generic.List<int>`)
+    # is one qualified_name whose text carries the type arguments; strip
+    # them so the written name matches the registered, generic-free qn.
+    if not node.text:
+        return None
+    text = safe_decode_text(node)
+    return text.split(cs.CHAR_ANGLE_OPEN, 1)[0] if text else None
 
 
 def _csharp_looks_like_interface(simple_name: str) -> bool:
