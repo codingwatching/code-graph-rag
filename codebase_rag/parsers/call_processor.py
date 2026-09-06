@@ -5922,10 +5922,19 @@ class CallProcessor:
         # exact` kept a target it should have dropped (#1543 review). Scoped:
         # the enclosing call's label is restored on the way out, so the edge
         # it emits afterwards reads its own verdict back (issue #1526).
+        # And, like a primary call, a callback that fans out to same-named
+        # candidates is an `overload`: one reference, several targets, none
+        # chosen (#1543 review). The resolver's single-target verdict would
+        # otherwise let an exact floor keep every one of them.
         prev_resolution = self._resolution
-        self._resolution = self._resolver.last_resolution
+        targets = registry.variants(res_qn)
+        self._resolution = (
+            cs.EdgeResolution.OVERLOAD
+            if len(targets) > 1
+            else self._resolver.last_resolution
+        )
         try:
-            for target_qn in registry.variants(res_qn):
+            for target_qn in targets:
                 ensure_rel(
                     source_spec,
                     rel_type,

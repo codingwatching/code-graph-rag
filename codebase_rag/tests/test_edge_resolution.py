@@ -184,6 +184,34 @@ def test_a_callback_carries_its_own_verdict_not_the_enclosing_calls(
     )
 
 
+def test_a_callback_that_fans_out_to_same_named_targets_is_an_overload(
+    temp_repo: Path, mock_ingestor: MagicMock
+) -> None:
+    # Two `lonely` definitions register as one natural qn plus a variant, so
+    # the callback reference fans out to both. A primary call to such a
+    # callee is labelled `overload`; the callback edges carried the
+    # resolver's single-target verdict (exact, through the import) instead,
+    # so an exact floor kept every candidate (#1543 review).
+    (temp_repo / "pkg").mkdir()
+    (temp_repo / "pkg" / "__init__.py").write_text("")
+    (temp_repo / "pkg" / "util.py").write_text(
+        "def sorted(items, key=None):\n    return items\n\n\n"
+        "def lonely(x):\n    return x\n\n\n"
+        "def lonely(x):\n    return -x\n"
+    )
+    (temp_repo / "pkg" / "app.py").write_text(
+        "from pkg.util import sorted, lonely\n\n\n"
+        "def run(xs):\n    return sorted(xs, key=lonely)\n"
+    )
+    create_and_run_updater(temp_repo, mock_ingestor)
+    by_callee = _resolutions(mock_ingestor, ".pkg.app.run")
+    assert by_callee["sorted"] == {cs.EdgeResolution.EXACT}
+    lonely = {k: v for k, v in by_callee.items() if k.startswith("lonely")}
+    assert len(lonely) == 2, f"the callback did not fan out: {by_callee}"
+    for target, labels in lonely.items():
+        assert labels == {cs.EdgeResolution.OVERLOAD}, (target, by_callee)
+
+
 def test_a_call_through_a_dotted_module_import_is_exact(
     temp_repo: Path, mock_ingestor: MagicMock
 ) -> None:
