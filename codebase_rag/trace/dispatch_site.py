@@ -132,6 +132,12 @@ def _called_identifier(node: Node) -> str | None:
     if node.type != cs.TS_PY_CALL:
         return None
     func = node.child_by_field_name(cs.FIELD_FUNCTION)
+    # `(fn)()` wraps the callee in a parenthesized_expression; the call is
+    # still of the bare name, and without the unwrap a stored computed
+    # lookup invoked this way was not recognised, so an unrelated literal in
+    # the same body could be recorded as the site (#1543 review).
+    while func is not None and func.type == cs.TS_PARENTHESIZED_EXPRESSION:
+        func = next((c for c in func.named_children), None)
     if func is None or func.type != cs.TS_PY_IDENTIFIER:
         return None
     return safe_decode_text(func)

@@ -474,6 +474,16 @@ def test_a_stored_computed_lookup_called_later_makes_the_edge_unlocatable(
         "    return fn()\n"
     )
     assert locate_dispatch_literal(tmp_path, "app.py", 1, 4, "target") is None
+    # A parenthesised callee is still that name: `(fn)()` must be recognised
+    # as the invocation of the stored lookup, or the unrelated literal is
+    # recorded as the site (#1543 review).
+    (tmp_path / "paren.py").write_text(
+        "def run(obj, registry, name, other):\n"
+        f"    {stored}\n"
+        '    getattr(other, "target")()\n'
+        "    return (fn)()\n"
+    )
+    assert locate_dispatch_literal(tmp_path, "paren.py", 1, 4, "target") is None
     # Stored from a literal key, the lookup is the site itself.
     (tmp_path / "plain.py").write_text(
         'def run(registry):\n    fn = registry["target"]\n    return fn()\n'
