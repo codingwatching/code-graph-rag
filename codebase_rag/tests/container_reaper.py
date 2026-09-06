@@ -25,6 +25,8 @@ from typing import Protocol
 
 from loguru import logger
 
+from codebase_rag import constants as cs
+
 CGR_CONTAINER_LABEL = "cgr.integration"
 CGR_CONTAINER_LABEL_VALUE = "memgraph"
 CGR_OWNER_HOST_LABEL = "cgr.integration.host"
@@ -91,6 +93,7 @@ def process_start_time(pid: int) -> str | None:
             ["ps", "-o", "lstart=", "-p", str(pid)],
             capture_output=True,
             text=True,
+            encoding=cs.ENCODING_UTF8,
             timeout=5,
             check=False,
         )
