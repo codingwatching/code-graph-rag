@@ -76,19 +76,30 @@ def _class_by_simple_name(
     # `Adapter`), prefer one nested in the CURRENT module: a sibling/enclosing
     # nested class shadows a same-named class elsewhere, so `class Sub extends
     # Adapter` binds to its own file's Adapter, not another file's that merely
-    # sorts first. Fall back to the first full-segment match otherwise.
+    # sorts first. Fall back to the first full-segment match otherwise. A
+    # dotted name (`Outer.Inner`, a nested type through its outer) matches on
+    # its whole segment sequence; `class_name in parts` could never match it
+    # and left every such base unresolved (CodeRabbit, #1770).
+    wanted = class_name.split(SEPARATOR_DOT)
     module_prefix = f"{module_qn}{SEPARATOR_DOT}"
     same_module = [
         match
         for match in matches
-        if match.startswith(module_prefix) and class_name in match.split(SEPARATOR_DOT)
+        if match.startswith(module_prefix) and _ends_with_segments(match, wanted)
     ]
     if same_module:
         return str(min(same_module, key=len))
     for match in matches:
-        if class_name in match.split(SEPARATOR_DOT):
+        if _ends_with_segments(match, wanted):
             return str(match)
     return None
+
+
+def _ends_with_segments(qualified_name: str, wanted: list[str]) -> bool:
+    """Whether the last `len(wanted)` dotted segments of `qualified_name` are
+    exactly `wanted`: a full-segment match, one segment or several."""
+    parts = qualified_name.split(SEPARATOR_DOT)
+    return len(parts) >= len(wanted) and parts[-len(wanted) :] == wanted
 
 
 def external_stdlib_base_method_names(parent_qns: list[str]) -> frozenset[str]:
