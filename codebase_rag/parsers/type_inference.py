@@ -618,14 +618,16 @@ class TypeInferenceEngine:
         self._go_free_fn_index_size = -1
 
     def drop_method_return_types(self, qns: Collection[str]) -> None:
-        """Forget the return types recorded under `qns` (issue #1738).
+        """Forget the return types recorded under `qns` (issues #1738, #1753).
 
         `GraphUpdater.remove_file_from_state` calls this for a deleted or
-        re-parsed file's definitions, beside `drop_go_return_types`. The map
-        is read directly, with no derived index to invalidate.
+        re-parsed file's definitions, beside `drop_go_return_types`. Both
+        maps, the general one and the C# `(type, arity)` one, are read
+        directly, with no derived index to invalidate.
         """
         for qn in qns:
             self.method_return_types.pop(qn, None)
+            self.csharp_method_return_types.pop(qn, None)
 
     def _go_free_fn_return_type(self, name: str, module_qn: str) -> str | None:
         # Same module (file) first; then the enclosing package's sibling files
