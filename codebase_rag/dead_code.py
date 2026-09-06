@@ -489,6 +489,95 @@ def _walk(
                 stack.append(nxt)
 
 
+def _is_root(
+    qn: str,
+    props: PropertyDict,
+    config: DeadCodeConfig,
+    method_qns: set[str],
+    protocol_stubs: set[str],
+    method_to_class: dict[str, str],
+    class_decorators_norm: dict[str, frozenset[str]],
+    nest_factory_classes: set[str],
+    react_component_classes: set[str],
+    rust_test_modules: set[str],
+    rust_test_spans: dict[str, list[tuple[int, int]]],
+    project_prefix: str,
+) -> bool:
+    """Whether any name-, path- or decorator-scoped rule makes `qn` a root."""
+    # The duplicate-qn marker (`init@51`, a SECOND Go init() in one file)
+    # is a registration artifact, never part of the written name; strip it
+    # so every name-scoped root rule sees the real leaf (kubernetes
+    # pkg.apis.abac register.init@51 reported dead).
+    leaf = qn.rsplit(cs.SEPARATOR_DOT, 1)[-1].split(cs.DUP_QN_MARKER, 1)[0]
+    path = str(props.get(cs.KEY_PATH, ""))
+    is_method = qn in method_qns
+    bare_leaf = leaf.split(cs.CHAR_PAREN_OPEN, 1)[0]
+    if _has_root_decorator(props, config.root_decorators):
+        return True
+    if props.get(cs.KEY_IS_EXPORTED) is True:
+        return True
+    # A method overriding an EXTERNAL stdlib base's method (click's
+    # textwrap.TextWrapper subclass) is invoked by the base's machinery,
+    # never by a first-party call, so it is a root.
+    if props.get(cs.KEY_OVERRIDES_EXTERNAL) is True:
+        return True
+    if qn in protocol_stubs:
+        return True
+    if is_method and _is_dunder(leaf) and path.endswith(cs.EXT_PY):
+        return True
+    # Python Enum protocol hooks (_generate_next_value_, _missing_) are
+    # invoked by the enum machinery by NAME, like dunders: roots, not
+    # dead code (django's TextChoices._generate_next_value_).
+    if is_method and leaf in cs.PY_ENUM_HOOK_METHOD_NAMES and path.endswith(cs.EXT_PY):
+        return True
+    if not is_method and leaf in cs.GO_ROOT_FUNCTION_NAMES and path.endswith(cs.EXT_GO):
+        return True
+    if _is_rust_runtime_root(leaf, is_method, path):
+        return True
+    # NOT leaf-based: the computed name contains a dot, so the qn's
+    # last dotted segment is `toStringTag]`; match on the bracketed
+    # member name as registered.
+    if _is_js_well_known_symbol_root(
+        str(props.get(cs.KEY_NAME) or ""), is_method, path
+    ):
+        return True
+    if _is_cpp_operator_root(leaf, path) or _is_c_cpp_entry_root(
+        leaf, is_method, path, qn, project_prefix
+    ):
+        return True
+    if _is_java_serialization_root(bare_leaf, is_method, path):
+        return True
+    if _is_csharp_attribute_root(props, path):
+        return True
+    if _is_csharp_dispose_root(bare_leaf, is_method, path):
+        return True
+    if _is_csharp_operator_or_finalizer_root(leaf, path):
+        return True
+    if _is_nest_root(
+        qn,
+        bare_leaf,
+        is_method,
+        path,
+        method_to_class,
+        class_decorators_norm,
+        nest_factory_classes,
+    ):
+        return True
+    if _is_react_root(
+        qn, bare_leaf, is_method, path, method_to_class, react_component_classes
+    ):
+        return True
+    if is_well_known_symbol_member(qn) and str(props.get(cs.KEY_PATH, "")).endswith(
+        cs.JS_TS_ALL_EXTENSIONS
+    ):
+        return True
+    if any(qn.endswith(entry) for entry in config.entry_points):
+        return True
+    return config.include_tests and _is_test_symbol(
+        props, qn, path, config.test_patterns, rust_test_modules, rust_test_spans
+    )
+
+
 def dead_code_from_graph(
     nodes: dict[_NodeId, PropertyDict],
     rels: list[_RelTuple],
@@ -606,97 +695,23 @@ def dead_code_from_graph(
         if qn in roots:
             continue
         props = props_by_qn[qn]
-        # The duplicate-qn marker (`init@51`, a SECOND Go init() in one file)
-        # is a registration artifact, never part of the written name; strip it
-        # so every name-scoped root rule sees the real leaf (kubernetes
-        # pkg.apis.abac register.init@51 reported dead).
-        leaf = qn.rsplit(cs.SEPARATOR_DOT, 1)[-1].split(cs.DUP_QN_MARKER, 1)[0]
-        path = str(props.get(cs.KEY_PATH, ""))
-        if _has_root_decorator(props, config.root_decorators):
-            roots.add(qn)
-        elif props.get(cs.KEY_IS_EXPORTED) is True:
-            roots.add(qn)
-        # A method overriding an EXTERNAL stdlib base's method (click's
-        # textwrap.TextWrapper subclass) is invoked by the base's machinery,
-        # never by a first-party call, so it is a root.
-        elif props.get(cs.KEY_OVERRIDES_EXTERNAL) is True:
-            roots.add(qn)
-        elif qn in protocol_stubs:
-            roots.add(qn)
-        elif qn in method_qns and _is_dunder(leaf) and path.endswith(cs.EXT_PY):
-            roots.add(qn)
-        # Python Enum protocol hooks (_generate_next_value_, _missing_) are
-        # invoked by the enum machinery by NAME, like dunders: roots, not
-        # dead code (django's TextChoices._generate_next_value_).
-        elif (
-            qn in method_qns
-            and leaf in cs.PY_ENUM_HOOK_METHOD_NAMES
-            and path.endswith(cs.EXT_PY)
-        ):
-            roots.add(qn)
-        elif (
-            qn not in method_qns
-            and leaf in cs.GO_ROOT_FUNCTION_NAMES
-            and path.endswith(cs.EXT_GO)
-        ):
-            roots.add(qn)
-        elif _is_rust_runtime_root(leaf, qn in method_qns, path):
-            roots.add(qn)
-        # NOT leaf-based: the computed name contains a dot, so the qn's
-        # last dotted segment is `toStringTag]`; match on the bracketed
-        # member name as registered.
-        elif _is_js_well_known_symbol_root(
-            str(props.get(cs.KEY_NAME) or ""), qn in method_qns, path
-        ):
-            roots.add(qn)
-        elif _is_cpp_operator_root(leaf, path) or _is_c_cpp_entry_root(
-            leaf, qn in method_qns, path, qn, project_prefix
-        ):
-            roots.add(qn)
-        elif _is_java_serialization_root(
-            leaf.split(cs.CHAR_PAREN_OPEN, 1)[0], qn in method_qns, path
-        ):
-            roots.add(qn)
-        elif _is_csharp_attribute_root(props, path):
-            roots.add(qn)
-        elif _is_csharp_dispose_root(
-            leaf.split(cs.CHAR_PAREN_OPEN, 1)[0], qn in method_qns, path
-        ):
-            roots.add(qn)
-        elif _is_csharp_operator_or_finalizer_root(leaf, path):
-            roots.add(qn)
-        elif _is_nest_root(
+        # Every rule below makes `qn` a root; they are alternatives, not a
+        # priority order, so one membership test replaces a chain of
+        # identical branches (Sonar S1871, #1669). Each rule keeps its
+        # comment where it applies.
+        if _is_root(
             qn,
-            leaf.split(cs.CHAR_PAREN_OPEN, 1)[0],
-            qn in method_qns,
-            path,
+            props,
+            config,
+            method_qns,
+            protocol_stubs,
             method_to_class,
             class_decorators_norm,
             nest_factory_classes,
-        ):
-            roots.add(qn)
-        elif _is_react_root(
-            qn,
-            leaf.split(cs.CHAR_PAREN_OPEN, 1)[0],
-            qn in method_qns,
-            path,
-            method_to_class,
             react_component_classes,
-        ):
-            roots.add(qn)
-        elif is_well_known_symbol_member(qn) and str(
-            props.get(cs.KEY_PATH, "")
-        ).endswith(cs.JS_TS_ALL_EXTENSIONS):
-            roots.add(qn)
-        elif any(qn.endswith(entry) for entry in config.entry_points):
-            roots.add(qn)
-        elif config.include_tests and _is_test_symbol(
-            props,
-            qn,
-            path,
-            config.test_patterns,
             rust_test_modules,
             rust_test_spans,
+            project_prefix,
         ):
             roots.add(qn)
 
