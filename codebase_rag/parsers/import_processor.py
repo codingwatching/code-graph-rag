@@ -939,7 +939,11 @@ class ImportProcessor:
                     self._parse_rust_imports(captures, module_qn)
                 case cs.SupportedLanguage.GO:
                     self._parse_go_imports(captures, module_qn)
-                case cs.SupportedLanguage.CPP:
+                # C shares the include grammar and the resolver: without its
+                # own arm here a `.c` file's `#include "foo.h"` never reached
+                # the import map, so it emitted no IMPORTS edge while a `.h`
+                # including the same header (parsed as C++) did (issue #1654).
+                case cs.SupportedLanguage.CPP | cs.SupportedLanguage.C:
                     self._parse_cpp_imports(captures, module_qn)
                 case cs.SupportedLanguage.LUA:
                     self._parse_lua_imports(captures, module_qn)

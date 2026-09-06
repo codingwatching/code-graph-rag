@@ -37,8 +37,9 @@ C: dict[str, str] = {
         "int add(int a, int b);\nstatic inline int twice(int a) { return a * 2; }\n"
     ),
     "util.c": '#include "util.h"\nint add(int a, int b) { return a + b; }\n',
-    # A `.c` includer emits no IMPORTS edge, so only a CALLS edge into the
-    # header's inline function ties this file to the survivor's changing qn.
+    # A `.c` includer carries both an IMPORTS edge to the header (since
+    # #1654) and a CALLS edge into its inline function; both must follow the
+    # survivor's changing qn.
     "main.c": '#include "util.h"\nint main(void) { return twice(1); }\n',
 }
 _ABSOLUTE = {cs.NodeLabel.FOLDER.value, cs.NodeLabel.PACKAGE.value}
