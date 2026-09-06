@@ -78,13 +78,27 @@ def _lookup_of(literal: Node) -> Node | None:
     return None
 
 
+def _through_parentheses(expr: Node) -> tuple[Node, Node | None]:
+    """`expr` and its parent, seen past any parentheses that wrap `expr`.
+
+    `(expr)()` and `name = (expr)` mean the same as their bare forms; every
+    check that asks what `expr` is the child of climbs through the wrapping
+    first (#1543 review).
+    """
+    value: Node = expr
+    parent = value.parent
+    while parent is not None and parent.type == cs.TS_PARENTHESIZED_EXPRESSION:
+        value, parent = parent, parent.parent
+    return value, parent
+
+
 def _is_invoked(expr: Node) -> bool:
-    """`expr` is the function of a call: `expr(...)`."""
-    parent = expr.parent
+    """`expr` is the function of a call: `expr(...)` or `(expr)(...)`."""
+    value, parent = _through_parentheses(expr)
     return (
         parent is not None
         and parent.type == cs.TS_PY_CALL
-        and parent.child_by_field_name(cs.FIELD_FUNCTION) == expr
+        and parent.child_by_field_name(cs.FIELD_FUNCTION) == value
     )
 
 
@@ -95,10 +109,7 @@ def _bound_name(expr: Node) -> str | None:
     without the climb the literal form of a stored lookup was not recorded
     as the binding (#1543 review).
     """
-    value: Node = expr
-    parent = value.parent
-    while parent is not None and parent.type == cs.TS_PARENTHESIZED_EXPRESSION:
-        value, parent = parent, parent.parent
+    value, parent = _through_parentheses(expr)
     if parent is None or parent.type != cs.TS_PY_ASSIGNMENT:
         return None
     left = parent.child_by_field_name(cs.FIELD_LEFT)

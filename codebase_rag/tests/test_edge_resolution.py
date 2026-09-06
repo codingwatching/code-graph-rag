@@ -507,6 +507,15 @@ def test_a_stored_computed_lookup_called_later_makes_the_edge_unlocatable(
         assert (
             locate_dispatch_literal(tmp_path, "plain.py", 1, 3, "target") is not None
         ), spelling
+    # Invoked directly through parentheses, the literal lookup is the site
+    # too (#1543 review).
+    for spelling in ('(registry["target"])()', '(getattr(obj, "target"))()'):
+        (tmp_path / "direct.py").write_text(
+            f"def run(obj, registry):\n    return {spelling}\n"
+        )
+        assert (
+            locate_dispatch_literal(tmp_path, "direct.py", 1, 2, "target") is not None
+        ), spelling
 
 
 def test_a_computed_callable_captured_from_an_enclosing_scope_is_computed(
