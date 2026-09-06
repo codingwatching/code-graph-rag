@@ -237,3 +237,47 @@ def test_a_test_packages_type_is_invisible_to_production_code(tmp_path: Path) ->
     assert by_caller.get("build") == {"proj.m.types.Error"}, by_caller
     assert by_caller.get("external") == {"proj.m.m_test.Error"}, by_caller
     assert by_caller.get("internal") == {"proj.m.types.Error"}, by_caller
+
+
+def test_a_local_type_is_visible_from_its_declaration_to_its_block_end(
+    tmp_path: Path,
+) -> None:
+    # Go scoping, not function scoping: a literal BEFORE the local
+    # declaration names the package type, and so does one outside the nested
+    # block that holds the declaration (CodeRabbit and #1747 review). Each
+    # function here constructs both, so its edge set must hold the package
+    # qn and its own local variant; a function-wide span would give only the
+    # local one.
+    root = tmp_path / "proj"
+    (root / "m").mkdir(parents=True)
+    (root / "go.mod").write_text("module proj\n\ngo 1.22\n", encoding="utf-8")
+    (root / "m" / "one.go").write_text(
+        "package m\n\n"
+        "type Local struct{}\n\n"
+        "func before() Local {\n"
+        "\tx := Local{}\n"
+        "\ttype Local struct{ V int }\n"
+        "\t_ = Local{V: 1}\n"
+        "\treturn x\n"
+        "}\n\n"
+        "func nested() Local {\n"
+        "\t{\n"
+        "\t\ttype Local struct{ V int }\n"
+        "\t\t_ = Local{V: 1}\n"
+        "\t}\n"
+        "\treturn Local{}\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    store = _index(root)
+
+    by_caller = _instantiates(store)
+    package_qn = "proj.m.one.Local"
+    assert by_caller.get("before") == {
+        package_qn,
+        f"{package_qn}{cs.DUP_QN_MARKER}7",
+    }, by_caller
+    assert by_caller.get("nested") == {
+        package_qn,
+        f"{package_qn}{cs.DUP_QN_MARKER}14",
+    }, by_caller
