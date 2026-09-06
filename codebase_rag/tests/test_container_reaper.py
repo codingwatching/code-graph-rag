@@ -14,8 +14,10 @@ from codebase_rag.tests.container_reaper import (
     CGR_CONTAINER_LABEL_VALUE,
     CGR_OWNER_HOST_LABEL,
     CGR_OWNER_PID_LABEL,
+    CGR_OWNER_STARTED_LABEL,
     cgr_container_labels,
     pid_is_alive,
+    process_start_time,
     reap_orphaned_containers,
 )
 
@@ -27,13 +29,22 @@ def _dead(pid: int) -> bool:
     return pid not in DEAD
 
 
-def _container(name: str, *, host: str = HOST, pid: int | str = 4242) -> MagicMock:
+STARTED = "Sat Sep  5 22:00:00 2026"
+
+
+def _container(
+    name: str, *, host: str = HOST, pid: int | str = 4242, started: str = STARTED
+) -> MagicMock:
     container = MagicMock(name=name)
     container.name = name
-    container.labels = cgr_container_labels(host=host, pid=pid)  # type: ignore[arg-type]
-    if not isinstance(pid, int):
-        container.labels[CGR_OWNER_PID_LABEL] = str(pid)
+    owner_pid = pid if isinstance(pid, int) else 0
+    container.labels = cgr_container_labels(host=host, pid=owner_pid, started=started)
+    container.labels[CGR_OWNER_PID_LABEL] = str(pid)
     return container
+
+
+def _started(pid: int) -> str | None:
+    return STARTED
 
 
 def _client(*containers: MagicMock) -> MagicMock:
@@ -42,8 +53,10 @@ def _client(*containers: MagicMock) -> MagicMock:
     return client
 
 
-def _reap(client: MagicMock) -> list[str]:
-    return reap_orphaned_containers(client, host=HOST, pid_alive=_dead)
+def _reap(client: MagicMock, start_time=_started) -> list[str]:
+    return reap_orphaned_containers(
+        client, host=HOST, pid_alive=_dead, start_time=start_time
+    )
 
 
 def test_every_orphaned_container_is_force_removed() -> None:
@@ -72,6 +85,38 @@ def test_a_live_sessions_container_is_kept() -> None:
     live.remove.assert_not_called()
     dead.remove.assert_called_once_with(force=True)
     assert removed == ["dead"]
+
+
+def test_a_reused_pid_does_not_pass_for_the_owner() -> None:
+    # The owner's pid is alive again, but held by a process started later:
+    # that is a corpse whose pid was handed out again, not a live suite
+    # (#1751 review). With no recorded start time, or none readable now,
+    # the pid check alone decides, in the keeping direction.
+    reused = _container("reused", pid=os.getpid())
+    unknown_then = _container("unknown-then", pid=os.getpid(), started="")
+    client = _client(reused, unknown_then)
+
+    removed = reap_orphaned_containers(
+        client,
+        host=HOST,
+        pid_alive=_dead,
+        start_time=lambda _pid: "Sun Sep  6 04:00:00 2026",
+    )
+
+    assert removed == ["reused"], removed
+    unknown_then.remove.assert_not_called()
+
+    unreadable = _container("unreadable", pid=os.getpid())
+    assert (
+        reap_orphaned_containers(
+            _client(unreadable),
+            host=HOST,
+            pid_alive=_dead,
+            start_time=lambda _pid: None,
+        )
+        == []
+    )
+    unreadable.remove.assert_not_called()
 
 
 def test_containers_this_host_cannot_judge_are_kept() -> None:
@@ -119,6 +164,18 @@ def test_pid_probe_tells_this_process_from_a_dead_one() -> None:
         # A pid no process holds; the largest allowed value is never in use
         # on a box that is not at its process limit.
         assert not pid_is_alive(2**22 - 1)
+    # A value the probe cannot even express must read as alive, not raise
+    # and abort the fixture before start() (CodeRabbit, #1751).
+    assert pid_is_alive(2**62)
+
+
+def test_a_start_time_is_read_for_this_process() -> None:
+    started = process_start_time(os.getpid())
+    if os.name == "nt":
+        assert started is None
+    else:
+        assert started, "ps -o lstart= gave nothing for a live pid"
+        assert cgr_container_labels()[CGR_OWNER_STARTED_LABEL] == started
 
 
 def test_own_labels_name_this_session() -> None:
@@ -126,6 +183,7 @@ def test_own_labels_name_this_session() -> None:
     assert labels[CGR_CONTAINER_LABEL] == CGR_CONTAINER_LABEL_VALUE
     assert labels[CGR_OWNER_HOST_LABEL]
     assert labels[CGR_OWNER_PID_LABEL] == str(os.getpid())
+    assert CGR_OWNER_STARTED_LABEL in labels
 
 
 def test_the_fixture_labels_its_container_and_reaps_before_starting() -> None:
