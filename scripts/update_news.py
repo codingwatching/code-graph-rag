@@ -118,8 +118,11 @@ def is_feature_theme(theme: str) -> bool:
 
 BODY_THEME = re.compile(r"\*\*(?P<theme>[^*]+?)\*\*")
 # Inline code is not prose: two `**kwargs`-style tokens would otherwise pair
-# up into a pseudo-bold whose "theme" is the text between them.
-CODE_SPAN = re.compile(r"`[^`]*`")
+# up into a pseudo-bold whose "theme" is the text between them. A span opens
+# with a run of backticks and closes with a run of the SAME length, so
+# ``**CI**`` (a double-backtick span) is one span, not two empty ones with a
+# bold left between them (#1748 review).
+CODE_SPAN = re.compile(r"(?P<delimiter>`+).*?(?P=delimiter)")
 
 
 def body_themes_are_features(text: str) -> bool:

@@ -141,6 +141,11 @@ class TestExtractBullets:
         assert extract_bullets(prose) == [prose]
         code = "- **Python Taint**: follows `**kwargs` through tests and `**args` too."
         assert extract_bullets(code) == [code]
+        # A double-backtick span is one span; stripping backtick pairs
+        # separately would leave `**CI**` behind as a bold (#1748 review).
+        double = "- **Web Search**: renders ``**CI**`` literally in results."
+        assert extract_bullets(double) == [double]
+        assert body_themes_are_features("``**docs**`` shown as code") is True
         assert is_feature_theme("Improvements") is True
         assert is_feature_theme("CI automation") is False
         assert body_themes_are_features("plain tests and docs in prose") is True
