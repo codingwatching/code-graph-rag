@@ -181,3 +181,21 @@ def test_an_alias_never_constructs_a_rival_nested_class(tmp_path: Path) -> None:
         # Exactly the receiver's own nested class: not the rival, and not
         # nothing (#1759 review, second round).
         assert by_caller.get(caller) == {"proj.mod_a.Outer.Inner"}, (caller, by_caller)
+
+
+def test_a_chained_assignment_binds_every_alias(tmp_path: Path) -> None:
+    # `Alias = Other = Outer` nests the second assignment on the first one's
+    # right-hand side; both names bind the terminal value (CodeRabbit, #1759).
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "mod_a.py").write_text(MOD_A, encoding="utf-8")
+    (root / "mod_b.py").write_text(
+        "from mod_a import Outer\n\nAlias = Second = Outer\n\n\n"
+        "def via_alias():\n    return Alias.Inner(3)\n\n\n"
+        "def via_second():\n    return Second.Inner(3)\n",
+        encoding="utf-8",
+    )
+
+    by_caller = _instantiates(root)
+    for caller in ("proj.mod_b.via_alias", "proj.mod_b.via_second"):
+        assert by_caller.get(caller) == {"proj.mod_a.Outer.Inner"}, (caller, by_caller)

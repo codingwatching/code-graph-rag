@@ -86,13 +86,26 @@ def _php_fold(name: str) -> str:
 
 
 def _module_level_assignments(root_node: Node) -> Iterator[Node]:
-    """Every `assignment` that is a top-level expression statement of the module."""
+    """Every `assignment` that is a top-level expression statement of the module.
+
+    A chained `Alias = Other = Outer` nests an assignment on the outer
+    right-hand side; each link is yielded, so every direct target is seen
+    (CodeRabbit, #1759).
+    """
     for child in root_node.children:
         if child.type != cs.TS_PY_EXPRESSION_STATEMENT or not child.children:
             continue
-        assignment = child.children[0]
-        if assignment.type == cs.TS_PY_ASSIGNMENT:
+        assignment: Node | None = child.children[0]
+        while assignment is not None and assignment.type == cs.TS_PY_ASSIGNMENT:
             yield assignment
+            assignment = assignment.child_by_field_name(cs.TS_FIELD_RIGHT)
+
+
+def _terminal_value(node: Node | None) -> Node | None:
+    """The value at the end of an assignment chain: `Outer` in `A = B = Outer`."""
+    while node is not None and node.type == cs.TS_PY_ASSIGNMENT:
+        node = node.child_by_field_name(cs.TS_FIELD_RIGHT)
+    return node
 
 
 def _rebound_alias(assignment: Node, name: str, bound: str | None) -> str | None:
@@ -108,7 +121,7 @@ def _rebound_alias(assignment: Node, name: str, bound: str | None) -> str | None
         return None if _binds_identifier(left, name) else bound
     if left.type != cs.TS_PY_IDENTIFIER or safe_decode_text(left) != name:
         return bound
-    right = assignment.child_by_field_name(cs.TS_FIELD_RIGHT)
+    right = _terminal_value(assignment.child_by_field_name(cs.TS_FIELD_RIGHT))
     if right is not None and right.type in (cs.TS_PY_IDENTIFIER, cs.TS_PY_ATTRIBUTE):
         return safe_decode_text(right)
     return None
