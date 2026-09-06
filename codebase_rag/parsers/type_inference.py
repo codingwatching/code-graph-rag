@@ -1,4 +1,4 @@
-from collections.abc import Mapping
+from collections.abc import Collection, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -597,6 +597,25 @@ class TypeInferenceEngine:
             class_qn = self._resolve_class_name(field_type, module_qn) or field_type
         method_qn = f"{class_qn}{cs.SEPARATOR_DOT}{segments[-1]}"
         return self.method_return_types.get(method_qn)
+
+    def drop_go_return_types(self, qns: Collection[str]) -> None:
+        """Forget the Go return types recorded under `qns` and drop the index.
+
+        `GraphUpdater.remove_file_from_state` calls this for a deleted or
+        re-parsed file's definitions. The map used to keep them (issue #1668),
+        and the `(package, name)` index below is filled with `setdefault`, so a
+        surviving or new sibling defining a free function of the same name lost
+        to the stale entry and its return type was never recorded.
+
+        The index is invalidated outright rather than left to the size check:
+        one deletion followed by one addition leaves the size unchanged, and
+        the check would then serve the stale index over a map that no longer
+        holds the entry.
+        """
+        for qn in qns:
+            self.go_function_return_types.pop(qn, None)
+        self._go_free_fn_index = {}
+        self._go_free_fn_index_size = -1
 
     def _go_free_fn_return_type(self, name: str, module_qn: str) -> str | None:
         # Same module (file) first; then the enclosing package's sibling files
