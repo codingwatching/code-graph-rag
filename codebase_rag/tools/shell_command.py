@@ -982,12 +982,9 @@ def _sed_exec_construct(cmd_parts: list[str]) -> str | None:
 
         if "=" in arg:
             scripts.append(arg.split("=", 1)[1])
-        elif arg in ("-e", "--expression"):
-            add(index + 1)
-            index += 1
-        elif _sed_cluster_tail(arg) == "-e":
-            # A bundled cluster ending in a bare `-e` (`-ne`, `-nEe`): the
-            # script is the NEXT token, exactly as for a standalone `-e`.
+        elif arg in ("-e", "--expression") or _sed_cluster_tail(arg) == "-e":
+            # A standalone `-e`, or a bundled cluster ending in a bare `-e`
+            # (`-ne`, `-nEe`): the script is the NEXT token in both cases.
             # Reading the cluster's own tail letter as the script -- `arg[2:]`
             # of `-ne` is `e` -- left the following `-e 'w FILE'` uncollected.
             add(index + 1)
