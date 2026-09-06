@@ -47,8 +47,9 @@ def test_a_run_rooted_at_a_deleted_file_raises(
     target.unlink()
     assert not target.exists(), "fixture guard: the target must be gone"
 
+    updater = _updater(target, mock_ingestor)
     with pytest.raises(FileNotFoundError, match="module_a.py"):
-        _updater(target, mock_ingestor).run()
+        updater.run()
 
     # Nothing was published for the run that never happened.
     after = (py_project / cs.HASH_CACHE_FILENAME).read_text(encoding="utf-8")
@@ -59,8 +60,9 @@ def test_a_run_rooted_at_a_missing_directory_raises(
     tmp_path: Path, mock_ingestor: MagicMock
 ) -> None:
     missing = tmp_path / "no_such_project"
+    updater = _updater(missing, mock_ingestor)
     with pytest.raises(FileNotFoundError, match="no_such_project"):
-        _updater(missing, mock_ingestor).run()
+        updater.run()
     assert not mock_ingestor.ensure_node_batch.called, (
         "a run rooted at a missing directory wrote to the graph"
     )
