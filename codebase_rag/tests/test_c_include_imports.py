@@ -106,3 +106,41 @@ def test_a_c_files_system_include_names_the_same_external_module_as_cpps(
         f"a .c system include named {from_c} where the same include from .cpp "
         f"named {from_cpp}"
     )
+
+
+@pytest.mark.parametrize("includer", ["a.c", "a.cpp"])
+def test_every_system_header_lands_under_the_std_prefix(
+    tmp_path: Path, includer: str
+) -> None:
+    # `startswith("std")` was a substring match: `<stdio.h>` and its family
+    # read as already prefixed and named ExternalModule `stdio.h`, while
+    # `<signal.h>` and `<vector>` in the same file named `std.signal.h` and
+    # `std.vector` (issue #1744). Every system header takes the one prefix.
+    parsers, queries = load_parsers()
+    for language in (cs.SupportedLanguage.C, cs.SupportedLanguage.CPP):
+        if language not in parsers:
+            pytest.skip(f"{language} parser not available")
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / includer).write_text(
+        "#include <stdio.h>\n#include <stdlib.h>\n#include <signal.h>\n"
+        "#include <vector>\nint x;\n",
+        encoding="utf-8",
+    )
+    store = _StatefulIngestor()
+    GraphUpdater(
+        ingestor=store,
+        repo_path=root,
+        parsers=parsers,
+        queries=queries,
+        project_name="proj",
+    ).run()
+    store.flush_all()
+    targets = {
+        str(dst)
+        for (_sl, _src, rel, _tl, dst) in store.edges
+        if rel == cs.RelationshipType.IMPORTS.value
+    }
+    assert targets == {"std.stdio.h", "std.stdlib.h", "std.signal.h", "std.vector"}, (
+        targets
+    )
