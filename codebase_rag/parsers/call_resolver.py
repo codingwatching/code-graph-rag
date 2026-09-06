@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from collections import defaultdict, deque
+from collections.abc import Iterator
 from pathlib import PurePath
 
 from loguru import logger
@@ -16,7 +17,7 @@ from .py import resolve_class_name
 from .rs import utils as rs_utils
 from .semantic_call_join import call_site_key, declared_location
 from .type_inference import TypeInferenceEngine
-from .utils import follow_reexports
+from .utils import follow_reexports, safe_decode_text
 
 _SEPARATOR_PATTERN = re.compile(r"[.:]|::")
 _SEARCH_NAME_CACHE: dict[str, str] = {}
@@ -82,6 +83,66 @@ _PHP_ASCII_FOLD = str.maketrans(
 def _php_fold(name: str) -> str:
     """ASCII-lowercase `name` for PHP-style case-insensitive comparison."""
     return name.translate(_PHP_ASCII_FOLD)
+
+
+def _module_level_assignments(root_node: Node) -> Iterator[Node]:
+    """Every `assignment` that is a top-level expression statement of the module.
+
+    A chained `Alias = Other = Outer` nests an assignment on the outer
+    right-hand side; each link is yielded, so every direct target is seen
+    (CodeRabbit, #1759).
+    """
+    for child in root_node.children:
+        if child.type != cs.TS_PY_EXPRESSION_STATEMENT or not child.children:
+            continue
+        assignment: Node | None = child.children[0]
+        while assignment is not None and assignment.type == cs.TS_PY_ASSIGNMENT:
+            yield assignment
+            assignment = assignment.child_by_field_name(cs.TS_FIELD_RIGHT)
+
+
+def _terminal_value(node: Node | None) -> Node | None:
+    """The value at the end of an assignment chain: `Outer` in `A = B = Outer`."""
+    while node is not None and node.type == cs.TS_PY_ASSIGNMENT:
+        node = node.child_by_field_name(cs.TS_FIELD_RIGHT)
+    return node
+
+
+def _rebound_alias(assignment: Node, name: str, bound: str | None) -> str | None:
+    """`bound` after `assignment`: the alias it binds `name` to, None when it
+    rebinds `name` to a value, `bound` unchanged when it does not touch `name`."""
+    left = assignment.child_by_field_name(cs.TS_FIELD_LEFT)
+    if left is None:
+        return bound
+    # An unpacking target (`Alias, other = make_pair()`) rebinds the name to
+    # a runtime value just as a plain assignment does, and it is never an
+    # alias (#1759 review).
+    if left.type in cs.PY_UNPACKING_TARGET_TYPES:
+        return None if _binds_identifier(left, name) else bound
+    if left.type != cs.TS_PY_IDENTIFIER or safe_decode_text(left) != name:
+        return bound
+    right = _terminal_value(assignment.child_by_field_name(cs.TS_FIELD_RIGHT))
+    if right is not None and right.type in (cs.TS_PY_IDENTIFIER, cs.TS_PY_ATTRIBUTE):
+        return safe_decode_text(right)
+    return None
+
+
+def _binds_identifier(target: Node, name: str) -> bool:
+    """Whether an unpacking target binds the bare name `name` at any depth.
+
+    Only bare identifiers bind a module-level name: `holder.Alias, x = ...`
+    assigns an attribute and `table[Alias], x = ...` a subscript, so those
+    subtrees are not descended into (#1759 review).
+    """
+    stack = [target]
+    while stack:
+        node = stack.pop()
+        if node.type in (cs.TS_PY_ATTRIBUTE, cs.TS_PY_SUBSCRIPT):
+            continue
+        if node.type == cs.TS_PY_IDENTIFIER and safe_decode_text(node) == name:
+            return True
+        stack.extend(node.named_children)
+    return False
 
 
 class CallResolver:
@@ -421,7 +482,35 @@ class CallResolver:
             receiver, module_qn, result[1], class_context, local_var_types
         ):
             return result
+        # The member lookup that produced `result` searches by bare name and
+        # can land on a same-named class nested in ANOTHER type (`Other.Inner`
+        # for `Outer.Inner()`). Rejecting that answer must not lose the
+        # construction the call spells out, so resolve the member under the
+        # receiver class itself, walking its bases (#1759 review).
+        member = call_name.rsplit(cs.SEPARATOR_DOT, 1)[-1]
+        if redirected := self._nested_class_under_receiver(receiver, module_qn, member):
+            return cs.NodeLabel.CLASS, redirected
         logger.debug(ls.CALL_UNRESOLVED, call_name=call_name)
+        return None
+
+    def _nested_class_under_receiver(
+        self, receiver: str, module_qn: str, member: str
+    ) -> str | None:
+        """`<receiver class>.<member>` when the receiver names a class that
+        declares (or inherits) a nested class called `member`."""
+        head, _, rest = receiver.partition(cs.SEPARATOR_DOT)
+        if not head or not head.isidentifier():
+            return None
+        base = self._receiver_base_qn(head, module_qn)
+        if base is None:
+            return None
+        owner = base if not rest else f"{base}{cs.SEPARATOR_DOT}{rest}"
+        if self.function_registry.get(owner) != cs.NodeLabel.CLASS:
+            return None
+        for ancestor in self._mro(owner):
+            candidate = f"{ancestor}{cs.SEPARATOR_DOT}{member}"
+            if self.function_registry.get(candidate) == cs.NodeLabel.CLASS:
+                return candidate
         return None
 
     def _receiver_names_a_type_or_module(
@@ -466,6 +555,14 @@ class CallResolver:
         # `from m import instance` and `import m` both land in the map, and only
         # the second is a namespace.
         full = base if not rest else f"{base}{cs.SEPARATOR_DOT}{rest}"
+        # A CLASS receiver constructs only its own nested classes: the member
+        # lookup that produced `resolved_qn` falls back to a search by the
+        # bare member name, which can land on a same-named class nested in
+        # another type, and an alias receiver has no precise member path at
+        # all (CodeRabbit, #1759). A module receiver keeps the namespace
+        # check.
+        if self.function_registry.get(full) == cs.NodeLabel.CLASS:
+            return self._class_is_nested_in(resolved_qn, full)
         return self._import_target_is_a_namespace(full)
 
     def _receiver_owns_nested_class(
@@ -510,7 +607,65 @@ class CallResolver:
         if class_qn and self.function_registry.get(class_qn) == cs.NodeLabel.CLASS:
             return class_qn
         import_map = self.import_processor.import_mapping.get(module_qn) or {}
-        return import_map.get(head)
+        if (imported := import_map.get(head)) is not None:
+            if self.function_registry.get(
+                imported
+            ) == cs.NodeLabel.CLASS or self._import_target_is_a_namespace(imported):
+                return imported
+            # An imported name that is neither a class nor a namespace may be
+            # an alias defined in the module it was imported FROM
+            # (`from mod_b import Alias` where mod_b says `Alias = Outer`);
+            # look it up there (#1672 local review).
+            owner_qn, _, alias_name = imported.rpartition(cs.SEPARATOR_DOT)
+            return self._class_bound_by_module_alias(alias_name, owner_qn)
+        # A module-level `Alias = Outer` names the class it binds: it is an
+        # assignment rather than an import, so it is in neither the class
+        # lookup nor the import map, and `Alias.Inner()` lost the INSTANTIATES
+        # edge `Outer.Inner()` keeps (issue #1672). Only a right-hand side
+        # that itself resolves to a Class counts; `inst = make()` still holds
+        # a value.
+        return self._class_bound_by_module_alias(head, module_qn)
+
+    def _class_bound_by_module_alias(self, name: str, module_qn: str) -> str | None:
+        if not name or not module_qn:
+            return None
+        target = self._module_level_alias_target(name, module_qn)
+        if target is None:
+            return None
+        alias_qn = self._resolve_class_name(target, module_qn)
+        if alias_qn and self.function_registry.get(alias_qn) == cs.NodeLabel.CLASS:
+            return alias_qn
+        return None
+
+    def _module_level_alias_target(self, name: str, module_qn: str) -> str | None:
+        """The name a module-level Python `name = Other` binds, or None.
+
+        Reads the module's cached AST rather than a recorded map: the
+        definition pass records no module-level assignments, and the
+        dotted spelling (`Alias = pkg.Outer`) is kept so the class lookup
+        can follow the import it names. The LAST module-level binding
+        decides: `Alias = Outer` followed by `Alias = make()` holds a value
+        by the time anything runs, so it names nothing (#1672 local review).
+        """
+        root_node = self._cached_module_root(module_qn)
+        if root_node is None:
+            return None
+        bound: str | None = None
+        for assignment in _module_level_assignments(root_node):
+            bound = _rebound_alias(assignment, name, bound)
+        return bound
+
+    def _cached_module_root(self, module_qn: str) -> Node | None:
+        file_path = self.type_inference.module_qn_to_file_path.get(module_qn)
+        if file_path is None:
+            return None
+        entry = self.type_inference.ast_cache.load(file_path)
+        # A guard, not a contract: resolver tests drive this with a stub cache
+        # whose `load` answers something that is not a (root, language) pair.
+        if not isinstance(entry, tuple) or len(entry) != 2:
+            return None
+        root_node = entry[0]
+        return root_node if isinstance(root_node, Node) else None
 
     def _class_is_nested_in(self, class_qn: str, owner_qn: str) -> bool:
         """Whether `class_qn` is declared inside `owner_qn` or one of its bases.

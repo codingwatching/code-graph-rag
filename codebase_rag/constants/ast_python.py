@@ -18,6 +18,13 @@ TS_PY_LIST_COMPREHENSION = "list_comprehension"
 TS_PY_FOR_STATEMENT = "for_statement"
 TS_PY_FOR_IN_CLAUSE = "for_in_clause"
 TS_PY_ASSIGNMENT = "assignment"
+# Unpacking targets: `a, b = ...`, `(a, b) = ...`, `[a, b] = ...`.
+TS_PY_PATTERN_LIST = "pattern_list"
+TS_PY_TUPLE_PATTERN = "tuple_pattern"
+TS_PY_LIST_PATTERN = "list_pattern"
+PY_UNPACKING_TARGET_TYPES = frozenset(
+    {TS_PY_PATTERN_LIST, TS_PY_TUPLE_PATTERN, TS_PY_LIST_PATTERN}
+)
 PY_ASSIGNMENT_QUERY = "(assignment) @assignment"
 PY_RETURN_QUERY = "(return_statement) @return_stmt"
 TS_PY_CLASS_DEFINITION = "class_definition"
