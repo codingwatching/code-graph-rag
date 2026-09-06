@@ -617,6 +617,16 @@ class TypeInferenceEngine:
         self._go_free_fn_index = {}
         self._go_free_fn_index_size = -1
 
+    def drop_method_return_types(self, qns: Collection[str]) -> None:
+        """Forget the return types recorded under `qns` (issue #1738).
+
+        `GraphUpdater.remove_file_from_state` calls this for a deleted or
+        re-parsed file's definitions, beside `drop_go_return_types`. The map
+        is read directly, with no derived index to invalidate.
+        """
+        for qn in qns:
+            self.method_return_types.pop(qn, None)
+
     def _go_free_fn_return_type(self, name: str, module_qn: str) -> str | None:
         # Same module (file) first; then the enclosing package's sibling files
         # (same parent dir), since Go free functions are package-scoped, not

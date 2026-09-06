@@ -2708,6 +2708,29 @@ class GraphUpdater:
         ]
         if stale_go_qns:
             self.factory.type_inference.drop_go_return_types(stale_go_qns)
+        # `method_return_types` is the same defect for a different map (issue
+        # #1738): C++, Rust and Dart free functions, every language's methods
+        # and Go receiver methods record their return type under the
+        # definition's qn, and this sweep never reached it. A Go method is
+        # keyed by its RECEIVER's module, so its qn can sit under a prefix this
+        # file does not own; `qns_to_remove` already carries the span-record
+        # ownership that catches it, and the prefix filter covers an entry
+        # whose registry row is already gone.
+        method_return_types = self.factory.type_inference.method_return_types
+        stale_method_qns = [
+            qn
+            for qn in method_return_types
+            if qn in qns_to_remove
+            or (
+                any(
+                    qn.startswith(f"{prefix}.") or qn == prefix
+                    for prefix in module_qn_prefixes
+                )
+                and qn not in foreign_qns
+            )
+        ]
+        if stale_method_qns:
+            self.factory.type_inference.drop_method_return_types(stale_method_qns)
 
         for simple_name, qn_set in self.simple_name_lookup.items():
             original_count = len(qn_set)
