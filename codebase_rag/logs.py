@@ -98,6 +98,13 @@ GO_FRONTEND_NO_FACTS = (
     "Go frontend produced no facts; every join falls back to tree-sitter. "
     "Tool diagnostics:\n{stderr}"
 )
+# A run rooted at a path that is neither a file nor a directory used to walk
+# nothing and report success (issue #1651): a deleted or mistyped target was
+# indistinguishable from one that was indexed.
+REPO_PATH_MISSING = (
+    "Repository path {path} does not exist as a file or a directory; nothing "
+    "was indexed"
+)
 GRAPH_ALREADY_IN_SYNC = (
     "Knowledge graph already in sync (hash cache matches every file). Skipping passes."
 )

@@ -1487,7 +1487,21 @@ class GraphUpdater:
         return known_module_paths
 
     def run(self, force: bool = False) -> None:
-        """Ingest the repository; ``force`` rebuilds instead of updating incrementally."""
+        """Ingest the repository; ``force`` rebuilds instead of updating incrementally.
+
+        Raises `FileNotFoundError` when `self.repo_path` -- the target
+        directory, or the parent of a single-file target -- is not a
+        directory. The constructor recognises a single-file target only
+        while the file exists, so a deleted or mistyped path fell through as
+        a directory run rooted at a non-directory: the walk yielded nothing
+        and the run reported success having indexed nothing (issue #1651).
+        Raising here rather than in the constructor keeps construction cheap
+        and side-effect free for callers that never run. A single-file
+        target deleted AFTER construction passes this check (its parent
+        exists) and is a separate decision (#1737).
+        """
+        if not self.repo_path.is_dir():
+            raise FileNotFoundError(ls.REPO_PATH_MISSING.format(path=self.repo_path))
         py_engine = self.factory.type_inference._python_type_inference
         if py_engine is not None:
             py_engine._available_classes_cache.clear()
