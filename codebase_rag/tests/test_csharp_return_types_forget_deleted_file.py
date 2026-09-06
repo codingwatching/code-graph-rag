@@ -45,9 +45,8 @@ def test_a_deleted_csharp_files_return_types_are_forgotten(temp_repo: Path) -> N
     recorded = updater.factory.type_inference.csharp_method_return_types
     self_qn = next((qn for qn in recorded if qn.endswith("K.Self")), None)
     twin_qn = next((qn for qn in recorded if qn.endswith("L.Twin")), None)
-    assert self_qn and twin_qn, (
-        f"fixture guard: the first run recorded nothing: {recorded}"
-    )
+    assert self_qn, f"fixture guard: A.cs recorded nothing: {recorded}"
+    assert twin_qn, f"fixture guard: B.cs recorded nothing: {recorded}"
 
     (root / "A.cs").unlink()
     updater.remove_file_from_state(root / "A.cs")
