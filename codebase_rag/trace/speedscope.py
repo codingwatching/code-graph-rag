@@ -82,13 +82,13 @@ def _accumulate_sampled(
         if not isinstance(stack, list):
             return False
         weight = _sample_weight(cast("list[object]", weights), position)
-        if not _accumulate_stack(cast("list[object]", stack), names, weight, edges):
+        if not _accumulate_stack(stack, names, weight, edges):
             return False
     return True
 
 
 def _accumulate_stack(
-    stack: list[object],
+    stack: Sequence[object],
     names: list[str | None],
     weight: float,
     edges: dict[tuple[str, str], float],
