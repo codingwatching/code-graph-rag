@@ -439,7 +439,35 @@ class CallResolver:
             receiver, module_qn, result[1], class_context, local_var_types
         ):
             return result
+        # The member lookup that produced `result` searches by bare name and
+        # can land on a same-named class nested in ANOTHER type (`Other.Inner`
+        # for `Outer.Inner()`). Rejecting that answer must not lose the
+        # construction the call spells out, so resolve the member under the
+        # receiver class itself, walking its bases (#1759 review).
+        member = call_name.rsplit(cs.SEPARATOR_DOT, 1)[-1]
+        if redirected := self._nested_class_under_receiver(receiver, module_qn, member):
+            return cs.NodeLabel.CLASS, redirected
         logger.debug(ls.CALL_UNRESOLVED, call_name=call_name)
+        return None
+
+    def _nested_class_under_receiver(
+        self, receiver: str, module_qn: str, member: str
+    ) -> str | None:
+        """`<receiver class>.<member>` when the receiver names a class that
+        declares (or inherits) a nested class called `member`."""
+        head, _, rest = receiver.partition(cs.SEPARATOR_DOT)
+        if not head or not head.isidentifier():
+            return None
+        base = self._receiver_base_qn(head, module_qn)
+        if base is None:
+            return None
+        owner = base if not rest else f"{base}{cs.SEPARATOR_DOT}{rest}"
+        if self.function_registry.get(owner) != cs.NodeLabel.CLASS:
+            return None
+        for ancestor in self._mro(owner):
+            candidate = f"{ancestor}{cs.SEPARATOR_DOT}{member}"
+            if self.function_registry.get(candidate) == cs.NodeLabel.CLASS:
+                return candidate
         return None
 
     def _receiver_names_a_type_or_module(

@@ -178,6 +178,6 @@ def test_an_alias_never_constructs_a_rival_nested_class(tmp_path: Path) -> None:
 
     by_caller = _instantiates(root)
     for caller in ("proj.mod_b.via_alias", "proj.mod_b.via_class"):
-        targets = by_caller.get(caller, set())
-        assert "proj.mod_a.Other.Inner" not in targets, (caller, by_caller)
-        assert targets <= {"proj.mod_a.Outer.Inner"}, (caller, by_caller)
+        # Exactly the receiver's own nested class: not the rival, and not
+        # nothing (#1759 review, second round).
+        assert by_caller.get(caller) == {"proj.mod_a.Outer.Inner"}, (caller, by_caller)
