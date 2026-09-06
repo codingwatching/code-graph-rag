@@ -4167,9 +4167,15 @@ class ImportProcessor:
                 local_name = header_name
 
             if is_system_include:
+                # The token, not the substring: `startswith("std")` took
+                # `<stdio.h>`, `<stdlib.h>`, `<stdint.h>` and the rest of that
+                # family as already prefixed, so they became ExternalModule
+                # `stdio.h` while `<signal.h>` in the same file became
+                # `std.signal.h` (issue #1744).
                 full_name = (
                     include_path
-                    if include_path.startswith(cs.CPP_STD_PREFIX)
+                    if include_path == cs.CPP_STD_PREFIX
+                    or include_path.startswith(cs.IMPORT_STD_PREFIX)
                     else f"{cs.IMPORT_STD_PREFIX}{include_path}"
                 )
             elif resolved := self._resolve_cpp_include_target(include_path, module_qn):
