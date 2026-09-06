@@ -10,7 +10,7 @@ import textwrap
 from collections.abc import Iterator
 from pathlib import Path
 from typing import IO
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 from loguru import logger
@@ -297,6 +297,45 @@ class TestFingerprintStamping:
         assert stamp.read_text(encoding="utf-8").strip() == (
             compute_parser_fingerprint(repo_path=py_project)
         )
+
+    def test_a_full_build_that_dies_before_the_flush_leaves_no_stamp(
+        self, py_project: Path, mock_ingestor: MagicMock
+    ) -> None:
+        """The stamp must not outlive a build whose writes never became durable.
+
+        Stamped inside `_process_files`, before the final flush, a full build
+        that died in between left a fingerprint claiming this parser's edges
+        were in the graph while the graph held none of them; the next run
+        compared equal and `_warn_if_parser_changed` stayed silent for exactly
+        the run that failed (issue #1634). The exclusion stamp, the hash cache
+        and the directory mtimes already commit after the flush; this pins the
+        fingerprint to the same point.
+
+        `_prune_orphan_nodes` sits between the old stamp site and the final
+        flush, so raising from it is a death in that window.
+        """
+        updater = _make_updater(py_project, mock_ingestor)
+        with (
+            patch.object(
+                updater,
+                "_prune_orphan_nodes",
+                side_effect=RuntimeError("died before the final flush"),
+            ),
+            pytest.raises(RuntimeError, match="died before the final flush"),
+        ):
+            updater.run()
+
+        assert not _fingerprint_path(py_project).exists(), (
+            "a full build that died before its final flush left a parser "
+            "fingerprint, so the next run will not warn that the graph was "
+            "built by different parser code"
+        )
+
+        # The control: the same build, allowed to reach its commit point,
+        # does stamp -- so the absence above is the deferral and not a stamp
+        # that never happens.
+        _make_updater(py_project, mock_ingestor).run()
+        assert _fingerprint_path(py_project).is_file()
 
     def test_incremental_sync_does_not_overwrite_stale_stamp(
         self, py_project: Path, mock_ingestor: MagicMock

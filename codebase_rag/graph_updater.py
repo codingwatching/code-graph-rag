@@ -580,6 +580,12 @@ class GraphUpdater:
         self._pending_hash_cache: tuple[Path, FileHashCache] | None = None
         self._pending_dir_mtimes: tuple[Path, DirMtimesCache] | None = None
         self._pending_cache_observed_at: float | None = None
+        # The parser fingerprint a full build will stamp, also deferred to the
+        # commit point (issue #1634): stamped inside `_process_files` it
+        # outlived a build that died before its final flush, and the next run
+        # then found the stamp equal to its own and never warned that the
+        # graph was built by different parser code.
+        self._pending_parser_fingerprint: str | None = None
         # Package paths read from the graph before Pass 1 of an incremental
         # run; None on a full build or when the graph could not be read.
         self._packages_before_run: set[str] | None = None
@@ -1311,6 +1317,7 @@ class GraphUpdater:
         self._pending_hash_cache = None
         self._pending_dir_mtimes = None
         self._pending_cache_observed_at = None
+        self._pending_parser_fingerprint = None
         if not force and self._is_already_in_sync():
             logger.info(ls.GRAPH_ALREADY_IN_SYNC)
             self.skipped_because_in_sync = True
@@ -1453,6 +1460,22 @@ class GraphUpdater:
                 self.repo_path / cs.DELOMBOK_STATE_FILENAME,
                 self._delombok_state_candidate,
             )
+
+        # The parser fingerprint commits here too, for the same reason
+        # (issue #1634). `_warn_if_parser_changed` compares the stored stamp
+        # with the current fingerprint to tell the user the graph was built by
+        # different parser code; a stamp written inside `_process_files`, before
+        # the flushes above, survived a full build that died in between and
+        # claimed this parser's edges were in a graph that held none of them,
+        # so the very run that failed was the one the warning stayed silent
+        # for. Set only by a full build (`_process_files`), so incremental runs
+        # keep the stale stamp and the warning with it.
+        if self._pending_parser_fingerprint is not None:
+            _save_parser_fingerprint(
+                self.repo_path / cs.PARSER_FINGERPRINT_FILENAME,
+                self._pending_parser_fingerprint,
+            )
+            self._pending_parser_fingerprint = None
 
         # Same commit point, for the same reason. The module deletions a newly
         # excluded file triggers are execute_write calls that only become
@@ -3561,13 +3584,13 @@ class GraphUpdater:
             self._pending_cache_observed_at = cache_mtime or 0.0
         # Stamp only full builds: re-stamping an incremental run would
         # silence the staleness warning while unchanged files still carry
-        # the old parser's edges.
+        # the old parser's edges. Stashed here and WRITTEN at the commit point
+        # in `run`, after the final flush (issue #1634): a build that dies
+        # between here and that flush must leave no stamp, or its successor
+        # reads its own fingerprint back and never warns.
         if is_full_build:
-            _save_parser_fingerprint(
-                self.repo_path / cs.PARSER_FINGERPRINT_FILENAME,
-                compute_parser_fingerprint(
-                    repo_path=self.repo_path, capture=self.capture
-                ),
+            self._pending_parser_fingerprint = compute_parser_fingerprint(
+                repo_path=self.repo_path, capture=self.capture
             )
 
     def _pre_parse_changed_files(
