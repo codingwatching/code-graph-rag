@@ -3078,12 +3078,24 @@ class GraphUpdater:
         self._delombok_state_candidate = current
 
     def _single_target_vanished(self, filepath: Path) -> bool:
-        """Whether `filepath` is this run's single target and is now gone."""
-        return (
-            self._single_file is not None
-            and filepath == self._single_file
-            and not filepath.exists()
-        )
+        """Whether `filepath` is this run's single target and its entry is gone.
+
+        Judged by the MISSING-PATH error from `lstat`, not by `Path.exists()`:
+        `exists()` answers False to any metadata failure, so a target that is
+        merely unreadable would have been classified as deleted and lose its
+        state and cache entry (#1755 review). `lstat` needs only search
+        permission on the directory, and `FileNotFoundError` from it means the
+        directory entry itself is gone.
+        """
+        if self._single_file is None or filepath != self._single_file:
+            return False
+        try:
+            os.lstat(filepath)
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+        return False
 
     def _collect_eligible_files(self) -> list[tuple[Path, str]]:
         if self._single_file is not None:
@@ -3288,8 +3300,12 @@ class GraphUpdater:
             if not force and file_key in old_hashes:
                 try:
                     file_mtime = filepath.stat().st_mtime
-                except OSError:
-                    if self._single_target_vanished(filepath):
+                except OSError as stat_error:
+                    # The stat's own error decides: a missing path is a
+                    # deletion, any other failure an unreadable file.
+                    if isinstance(
+                        stat_error, FileNotFoundError
+                    ) and self._single_target_vanished(filepath):
                         single_gone_key = file_key
                         continue
                     unreadable_count += 1

@@ -167,3 +167,39 @@ def test_a_target_deleted_during_hashing_is_a_deletion_too(temp_repo: Path) -> N
     after = _cache(temp_repo)
     assert "module_a.py" not in after, f"the cache still lists the target: {after}"
     assert after.get("module_b.py") == before["module_b.py"]
+
+
+def test_an_unreadable_but_present_target_is_not_treated_as_deleted(
+    temp_repo: Path,
+) -> None:
+    # The other side of the race rule (#1755 review): a read that fails for a
+    # reason other than a missing path (here the hash helper returns nothing
+    # while the file is still there) must stay on the unreadable path and
+    # keep the target's state and cache entry.
+    (temp_repo / "module_a.py").write_text("def func_a():\n    pass\n")
+    (temp_repo / "module_b.py").write_text("def func_b():\n    pass\n")
+    store = _StatefulIngestor()
+    _create_graph_updater(temp_repo, store).run()
+    store.flush_all()
+    before = _cache(temp_repo)
+
+    target = temp_repo / "module_a.py"
+    cache_mtime = (temp_repo / cs.HASH_CACHE_FILENAME).stat().st_mtime
+    os.utime(target, (cache_mtime + 2, cache_mtime + 2))
+    updater = _create_graph_updater(target, store)
+
+    with (
+        patch.object(graph_updater_module, "_hash_file_with_bytes", lambda _p: None),
+        patch.object(store, "execute_write", wraps=store.execute_write) as spy,
+    ):
+        updater.run()
+    store.flush_all()
+
+    assert target.exists()
+    assert not [
+        query for query, _params in _writes(spy) if query == cs.CYPHER_DELETE_FILE
+    ], "an unreadable target that still exists was treated as deleted"
+    assert any(
+        qn.startswith("proj.module_a") for qn in updater.function_registry.keys()
+    ), "the unreadable target lost its definitions"
+    assert _cache(temp_repo).get("module_a.py") == before["module_a.py"]
