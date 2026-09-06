@@ -26,7 +26,11 @@ from typing import Any
 
 import pytest
 
-from codebase_rag.tests.conftest import _clear_readonly
+from codebase_rag.tests.conftest import (
+    _clear_readonly,
+    collect_loose_objects,
+    git_env,
+)
 
 
 def _windows_unlink(real_unlink: Any) -> Any:
@@ -144,25 +148,35 @@ def test_a_real_git_repo_is_removable_by_the_temp_repo_teardown(
     """
     repo = tmp_path / "repo"
     repo.mkdir()
-    env = {
-        **os.environ,
-        "GIT_AUTHOR_NAME": "t",
-        "GIT_AUTHOR_EMAIL": "t@e",
-        "GIT_COMMITTER_NAME": "t",
-        "GIT_COMMITTER_EMAIL": "t@e",
-    }
+    # `git_env`, not `{**os.environ, ...}`: an inherited GIT_DIR,
+    # GIT_WORK_TREE, GIT_INDEX_FILE or GIT_OBJECT_DIRECTORY sends `git init`
+    # somewhere else, exits 0, and leaves this test scanning a repo that was
+    # never built here (issue #1673).
+    # The config files are neutralised too, as the `git_repo` fixture does: a
+    # global `commit.gpgsign=true` or a hook path would otherwise reach the
+    # commit below and fail it for reasons that have nothing to do with
+    # read-only objects (#1673 local review).
+    env = git_env(
+        GIT_AUTHOR_NAME="t",
+        GIT_AUTHOR_EMAIL="t@e",
+        GIT_COMMITTER_NAME="t",
+        GIT_COMMITTER_EMAIL="t@e",
+        GIT_CONFIG_GLOBAL=str(tmp_path / "gitconfig-absent"),
+        GIT_CONFIG_SYSTEM=str(tmp_path / "gitconfig-absent"),
+    )
     subprocess.run(["git", "init", "-q"], cwd=repo, check=True, env=env)
+    assert (repo / ".git").is_dir(), "git init built its repository elsewhere"
     (repo / "a.py").write_text("x = 1\n", encoding="utf-8")
     subprocess.run(["git", "add", "a.py"], cwd=repo, check=True, env=env)
     subprocess.run(["git", "commit", "-qm", "c"], cwd=repo, check=True, env=env)
 
-    objects = repo / ".git" / "objects"
-    readonly = [
-        p
-        for p in objects.rglob("*")
-        if p.is_file() and not (p.stat().st_mode & stat.S_IWRITE)
-    ]
-    assert readonly, "git wrote no read-only loose objects; nothing to test"
+    # Loose objects ONLY. A scan of all of `objects/` counts `pack/*.pack`,
+    # `*.idx`, `*.rev` and `commit-graph`, which git also writes mode 444, so
+    # it was satisfied by a packed repo holding zero loose objects -- the
+    # state this guard exists to reject (issue #1652).
+    listed, readonly_modes = collect_loose_objects(repo)
+    assert listed, "git wrote no loose objects; nothing to test"
+    assert readonly_modes, "git wrote no read-only loose objects; nothing to test"
 
     shutil.rmtree(repo, onexc=_clear_readonly)
     assert not repo.exists()

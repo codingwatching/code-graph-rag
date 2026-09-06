@@ -38,7 +38,6 @@ reason above.
 from __future__ import annotations
 
 import os
-import re
 import stat
 import subprocess
 import sys
@@ -47,6 +46,7 @@ from pathlib import Path
 import pytest
 
 from codebase_rag import constants as cs
+from codebase_rag.tests.conftest import collect_loose_objects
 
 # Planted by the inner session so the outer test can find the tree afterwards.
 _INNER_TEST = """
@@ -606,60 +606,6 @@ def test_non_removal_funcs_lists_every_callable_rmtree_passes() -> None:
     assert os.rmdir not in _NON_REMOVAL_FUNCS
 
 
-_FANOUT_DIR = re.compile(r"[0-9a-f]{2}")
-# 38 hex for sha1 object names, 62 for sha256; the leading two hex chars are
-# the fanout directory, so a basename is the remaining 38 or 62. Fixtures
-# here pin sha1, but the helper must not silently discard a sha256 repo.
-_LOOSE_OBJECT = re.compile(r"[0-9a-f]{38}|[0-9a-f]{62}")
-
-
-def _collect_loose_objects(repo: Path) -> tuple[list[str], list[int]]:
-    """Return the loose objects under `repo`, and which of them are read-only.
-
-    Counts ONLY `objects/<2 hex>/<38 or 62 hex>` (sha1 or sha256 basenames).
-    Everything else under `objects/` is a different kind of file, and several
-    are mode 444: `pack/*.pack`, `*.idx`, `*.rev`, `commit-graph`. Walking all
-    of `objects/` would let those satisfy a "git wrote read-only loose
-    objects" assertion with zero loose objects present -- the exact state such
-    an assertion exists to reject. Git only packs at `gc.auto` (6700) loose
-    objects, so the fixture cannot reach that today, but the guard must not
-    depend on that staying true.
-    `test_the_loose_object_filter_rejects_a_packed_repo` pins the packed
-    difference; `test_the_loose_object_filter_accepts_a_sha256_repo` pins the
-    62-hex branch, which the sha1 pins in every other fixture would otherwise
-    leave uncovered.
-
-    Modes are read AT LISTING TIME, one `lstat` per entry, never a second
-    pass. `git commit` spawns `git maintenance run --auto --quiet --detach`,
-    which deletes its own `.git/objects/maintenance.lock` asynchronously, so a
-    list-then-stat pair races it: the entry is listed and gone by the time the
-    stat runs. That is the TOCTOU `_clear_readonly` documents, and it failed
-    exactly once, on macos/3.13 under xdist (#1622). A vanished entry is
-    skipped rather than tolerated after the fact: it cannot be the read-only
-    loose object callers assert on, because a loose object is permanent for
-    the life of the repo while the lock is transient.
-    """
-    listed: list[str] = []
-    readonly_modes: list[int] = []
-    for dirpath, _dirs, _files in os.walk(repo / ".git" / "objects"):
-        if not _FANOUT_DIR.fullmatch(os.path.basename(dirpath)):
-            continue
-        with os.scandir(dirpath) as entries:
-            for entry in entries:
-                if not entry.is_file(follow_symlinks=False):
-                    continue
-                if not _LOOSE_OBJECT.fullmatch(entry.name):
-                    continue
-                try:
-                    mode = entry.stat(follow_symlinks=False).st_mode
-                except FileNotFoundError:
-                    continue
-                listed.append(entry.name)
-                if not mode & stat.S_IWUSR:
-                    readonly_modes.append(mode)
-    return listed, readonly_modes
-
-
 def test_git_repo_fixture_survives_an_inherited_git_dir(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -749,7 +695,7 @@ def test_git_repo_fixture_tears_down_its_own_readonly_objects(
     # is skipped rather than tolerated after the fact: it cannot be the
     # read-only loose object this asserts on, because a loose object is
     # permanent for the life of the repo while the lock is transient.
-    listed, readonly_modes = _collect_loose_objects(git_repo)
+    listed, readonly_modes = collect_loose_objects(git_repo)
 
     assert listed, "git wrote no loose objects, so the fixture proves nothing"
     assert readonly_modes, (
@@ -763,7 +709,7 @@ def test_the_loose_object_filter_rejects_a_packed_repo(
 ) -> None:
     """A repo with no loose objects must fail the guard, not pass it on packs.
 
-    This is the control for `_collect_loose_objects`. Widening it back to all
+    This is the control for `collect_loose_objects`. Widening it back to all
     of `objects/` leaves every other test in this file green, because the
     fixture never packs -- so without this test the filter can regress
     silently. `git gc` here creates the state the fixture cannot reach on its
@@ -799,7 +745,7 @@ def test_the_loose_object_filter_rejects_a_packed_repo(
         check=True,
         env=env,
     )
-    assert _collect_loose_objects(repo)[0], "no loose objects before gc: bad control"
+    assert collect_loose_objects(repo)[0], "no loose objects before gc: bad control"
 
     subprocess.run(
         ["git", "gc", "-q", "--prune=now"],
@@ -831,7 +777,7 @@ def test_the_loose_object_filter_rejects_a_packed_repo(
     decoy.write_bytes(b"not an object")
     decoy.chmod(0o444)
 
-    listed, readonly_modes = _collect_loose_objects(repo)
+    listed, readonly_modes = collect_loose_objects(repo)
     assert listed == [], (
         f"packed artefacts or temp files counted as loose objects: {listed} "
         "-- the filter no longer discriminates and the fixture guard is "
@@ -890,7 +836,7 @@ def test_the_loose_object_filter_accepts_a_sha256_repo(
         env=env,
     )
 
-    listed, _readonly_modes = _collect_loose_objects(repo)
+    listed, _readonly_modes = collect_loose_objects(repo)
     assert listed, (
         "a sha256 repo's loose objects were all discarded: the 62-hex half of "
         "`_LOOSE_OBJECT` no longer matches, so the helper silently reports an "

@@ -3,6 +3,7 @@ from __future__ import annotations
 import builtins
 import functools
 import os
+import re
 import shutil
 import stat
 import subprocess
@@ -554,6 +555,63 @@ def _tmp_path_stays_removable(request: pytest.FixtureRequest) -> Generator[None]
     yield
     if root is not None:
         _make_tmp_path_removable(root)
+
+
+_FANOUT_DIR = re.compile(r"[0-9a-f]{2}")
+# 38 hex for sha1 object names, 62 for sha256; the leading two hex chars are
+# the fanout directory, so a basename is the remaining 38 or 62. Fixtures
+# here pin sha1, but the helper must not silently discard a sha256 repo.
+_LOOSE_OBJECT = re.compile(r"[0-9a-f]{38}|[0-9a-f]{62}")
+
+
+def collect_loose_objects(repo: Path) -> tuple[list[str], list[int]]:
+    """Return the loose objects under `repo`, and which of them are read-only.
+
+    Counts ONLY `objects/<2 hex>/<38 or 62 hex>` (sha1 or sha256 basenames).
+    Everything else under `objects/` is a different kind of file, and several
+    are mode 444: `pack/*.pack`, `*.idx`, `*.rev`, `commit-graph`. Walking all
+    of `objects/` would let those satisfy a "git wrote read-only loose
+    objects" assertion with zero loose objects present -- the exact state such
+    an assertion exists to reject. Git only packs at `gc.auto` (6700) loose
+    objects, so the fixture cannot reach that today, but the guard must not
+    depend on that staying true.
+    Shared by every test that asserts on git's loose objects (issue #1652):
+    a scan of all of `objects/` in test_temp_repo_readonly_cleanup passed on
+    pack files alone.
+    `test_the_loose_object_filter_rejects_a_packed_repo` pins the packed
+    difference; `test_the_loose_object_filter_accepts_a_sha256_repo` pins the
+    62-hex branch, which the sha1 pins in every other fixture would otherwise
+    leave uncovered.
+
+    Modes are read AT LISTING TIME, one `lstat` per entry, never a second
+    pass. `git commit` spawns `git maintenance run --auto --quiet --detach`,
+    which deletes its own `.git/objects/maintenance.lock` asynchronously, so a
+    list-then-stat pair races it: the entry is listed and gone by the time the
+    stat runs. That is the TOCTOU `_clear_readonly` documents, and it failed
+    exactly once, on macos/3.13 under xdist (#1622). A vanished entry is
+    skipped rather than tolerated after the fact: it cannot be the read-only
+    loose object callers assert on, because a loose object is permanent for
+    the life of the repo while the lock is transient.
+    """
+    listed: list[str] = []
+    readonly_modes: list[int] = []
+    for dirpath, _dirs, _files in os.walk(repo / ".git" / "objects"):
+        if not _FANOUT_DIR.fullmatch(os.path.basename(dirpath)):
+            continue
+        with os.scandir(dirpath) as entries:
+            for entry in entries:
+                if not entry.is_file(follow_symlinks=False):
+                    continue
+                if not _LOOSE_OBJECT.fullmatch(entry.name):
+                    continue
+                try:
+                    mode = entry.stat(follow_symlinks=False).st_mode
+                except FileNotFoundError:
+                    continue
+                listed.append(entry.name)
+                if not mode & stat.S_IWUSR:
+                    readonly_modes.append(mode)
+    return listed, readonly_modes
 
 
 def git_env(**overrides: str) -> dict[str, str]:
