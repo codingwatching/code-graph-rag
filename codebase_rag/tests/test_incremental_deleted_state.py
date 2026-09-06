@@ -438,6 +438,90 @@ def test_a_cpp_interface_parsed_this_run_survives_rehydration(
     assert implements, "the interface was dropped before its impl resolved"
 
 
+@pytest.mark.parametrize("reuse_updater", [False, True], ids=["fresh", "reused"])
+def test_rehydration_readds_an_interface_held_only_by_the_graph(
+    temp_repo: Path, reuse_updater: bool
+) -> None:
+    # The positive direction of the rebuild (issue #1736): an interface parsed
+    # in an EARLIER run and untouched now is absent from
+    # cpp_interfaces_parsed_this_run, so only the graph rows can put it back.
+    # resolve_deferred_cpp_module_impls checks membership in
+    # cpp_module_interfaces, so with the re-add gone an implementation unit
+    # edited on its own loses its IMPLEMENTS edge. A sibling's fixture guard
+    # ("the shape did not rehydrate") does catch the missing membership, but
+    # nothing asserted the IMPLEMENTS edge on the incremental run or covered
+    # a reused updater (measured: a resolver reading
+    # cpp_interfaces_parsed_this_run instead of cpp_module_interfaces leaves
+    # every other test in this file green and fails only this one). A fresh
+    # updater has never parsed the interface at all; a reused one parsed it
+    # last run, and the per-run reset of the companion set is what makes the
+    # graph the only source there too.
+    root = temp_repo / "proj"
+    _materialise(
+        root,
+        {
+            "iface.cppm": "export module M;\nexport int f();\n",
+            "impl.cpp": "module M;\nint f() { return 1; }\n",
+        },
+    )
+    store = _StatefulIngestor()
+    first = _updater(store, root, cs.SupportedLanguage.CPP)
+    if cs.SupportedLanguage.CPP not in first.parsers:
+        pytest.skip("cpp parser not available")
+    first.run(force=True)
+    clean_edges = [
+        edge for edge in store.edges if edge[2] == cs.RelationshipType.IMPLEMENTS.value
+    ]
+    assert len(clean_edges) == 1, (
+        f"fixture guard: the clean index did not resolve impl.cpp against M: {clean_edges}"
+    )
+    impl_label, impl_qn, _rel, iface_label, iface_qn = clean_edges[0]
+    assert (str(iface_label), str(iface_qn)) == (
+        cs.NodeLabel.MODULE_INTERFACE.value,
+        "proj.M",
+    ), clean_edges
+    assert str(impl_label) == cs.NodeLabel.MODULE_IMPLEMENTATION.value, clean_edges
+
+    second = first if reuse_updater else _updater(store, root, cs.SupportedLanguage.CPP)
+    (root / "impl.cpp").write_text(
+        "module M;\nint f() { return 2; }\n", encoding="utf-8"
+    )
+    _bump(root, "impl.cpp")
+    dp = second.factory.definition_processor
+    with patch.object(
+        store, "ensure_relationship_batch", wraps=store.ensure_relationship_batch
+    ) as spy:
+        second.run(force=False)
+
+    assert "proj.M" not in dp.cpp_interfaces_parsed_this_run, (
+        "fixture guard: the interface was re-parsed, so the companion set and "
+        "not the graph rows would have kept it"
+    )
+    assert "proj.M" in dp.cpp_module_interfaces, (
+        "rehydration did not re-add the interface the graph holds: "
+        f"{sorted(dp.cpp_module_interfaces)}"
+    )
+    # The same endpoints the clean index produced, not just any IMPLEMENTS
+    # (CodeRabbit, #1754): the implementation unit as source, `proj.M` as the
+    # ModuleInterface target.
+    implements_now = [
+        (
+            str(call.args[0][0]),
+            str(call.args[0][2]),
+            str(call.args[2][0]),
+            str(call.args[2][2]),
+        )
+        for call in spy.call_args_list
+        if str(call.args[1]) == cs.RelationshipType.IMPLEMENTS.value
+    ]
+    assert implements_now == [
+        (str(impl_label), str(impl_qn), str(iface_label), str(iface_qn))
+    ], (
+        "the edited implementation unit lost its IMPLEMENTS edge on the "
+        f"incremental run, or emitted it between other endpoints: {implements_now}"
+    )
+
+
 def test_a_cpp_interface_the_graph_lost_is_forgotten(temp_repo: Path) -> None:
     # The mirror case: an interface another writer deleted must not linger,
     # or resolve_deferred_cpp_module_impls mints an IMPLEMENTS edge to a
