@@ -3369,6 +3369,26 @@ class GraphUpdater:
         # already reprocessed. Single-file runs never commit it either.
         self._delombok_state_candidate = current
 
+    def _single_target_vanished(self, filepath: Path) -> bool:
+        """Whether `filepath` is this run's single target and its entry is gone.
+
+        Judged by the MISSING-PATH error from `lstat`, not by `Path.exists()`:
+        `exists()` answers False to any metadata failure, so a target that is
+        merely unreadable would have been classified as deleted and lose its
+        state and cache entry (#1755 review). `lstat` needs only search
+        permission on the directory, and `FileNotFoundError` from it means the
+        directory entry itself is gone.
+        """
+        if self._single_file is None or filepath != self._single_file:
+            return False
+        try:
+            os.lstat(filepath)
+        except FileNotFoundError:
+            return True
+        except OSError:
+            return False
+        return False
+
     def _collect_eligible_files(self) -> list[tuple[Path, str]]:
         if self._single_file is not None:
             if not should_skip_path(
@@ -3549,12 +3569,37 @@ class GraphUpdater:
         # costs a redundant rehash; erring late loses an edit.
         self._pending_cache_observed_at = time.time()
 
+        # A single-file target that existed at construction and is gone by
+        # now is a DELETION, not an unreadable file (issue #1737). Left on the
+        # unreadable path the run logged "Skipped 1 unreadable files",
+        # returned normally and republished a cache still naming the file,
+        # with the file's definitions still in the registry: a caller of the
+        # file-target constructor got a success signal for a file that was
+        # not indexed (the orphan prune had already removed its graph nodes).
+        # Its state, nodes and cache entry go the way `deleted_keys` takes
+        # them below.
+        single_gone_key: str | None = None
+        if (
+            self._single_file is not None
+            and eligible_files
+            and not self._single_file.exists()
+        ):
+            single_gone_key = eligible_files[0][1]
+            eligible_files = []
+
         changed_entries: list[tuple[Path, str, bool, bytes]] = []
         for filepath, file_key in eligible_files:
             if not force and file_key in old_hashes:
                 try:
                     file_mtime = filepath.stat().st_mtime
-                except OSError:
+                except OSError as stat_error:
+                    # The stat's own error decides: a missing path is a
+                    # deletion, any other failure an unreadable file.
+                    if isinstance(
+                        stat_error, FileNotFoundError
+                    ) and self._single_target_vanished(filepath):
+                        single_gone_key = file_key
+                        continue
                     unreadable_count += 1
                     unreadable_keys.add(file_key)
                     continue
@@ -3566,6 +3611,13 @@ class GraphUpdater:
 
             hashed = _hash_file_with_bytes(filepath)
             if hashed is None:
+                # The same deletion, one step later: a target that passed the
+                # existence check and was removed before its stat or read is
+                # gone all the same, and the unreadable path would keep its
+                # state and cache entry (#1755 review).
+                if self._single_target_vanished(filepath):
+                    single_gone_key = file_key
+                    continue
                 unreadable_count += 1
                 unreadable_keys.add(file_key)
                 continue
@@ -3816,11 +3868,18 @@ class GraphUpdater:
         # names only that file and every sibling looks deleted. It cannot
         # speak for the project's file set, for the same reason `run` guards
         # the exclusion stamp with `self._single_file is None` (#1619).
-        deleted_keys = (
-            (set(old_hashes.keys()) | graph_paths) - current_file_keys - unreadable_keys
-            if self._single_file is None
-            else set()
-        )
+        if self._single_file is None:
+            deleted_keys = (
+                (set(old_hashes.keys()) | graph_paths)
+                - current_file_keys
+                - unreadable_keys
+            )
+        elif single_gone_key is not None:
+            # The one file this run was asked about is gone: exactly that key,
+            # never the siblings the project-wide terms would name (#1737).
+            deleted_keys = {single_gone_key}
+        else:
+            deleted_keys = set()
         if deleted_keys:
             logger.info(ls.INCREMENTAL_DELETED, count=len(deleted_keys))
             for deleted_key in deleted_keys:
@@ -3881,10 +3940,14 @@ class GraphUpdater:
             # reconciles properly (#1619 review, round 5). Measured: with the
             # cache removed, a single-file run then a project run left
             # `module_b.py` undeleted after an edit.
+            merged_hashes = {**pristine_hashes, **new_hashes}
+            if single_gone_key is not None:
+                # The deleted target must leave the cache too, or the next
+                # project run reads it as indexed and never reconciles the
+                # graph (#1737).
+                merged_hashes.pop(single_gone_key, None)
             self._pending_hash_cache = (
-                (cache_path, {**pristine_hashes, **new_hashes})
-                if pristine_hashes
-                else None
+                (cache_path, merged_hashes) if pristine_hashes else None
             )
             # And it must carry the PREVIOUS cache's mtime forward rather
             # than stamping this run's instant. The merged entries are mostly
