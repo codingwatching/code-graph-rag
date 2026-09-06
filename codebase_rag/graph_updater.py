@@ -2983,7 +2983,14 @@ class GraphUpdater:
         # writes `...A.Clone`, its span record says `...A.Clone@3`), and a
         # few writers (deferred Rust functions, duplicate C++ out-of-class
         # methods) key the map by the `@line` name itself (#1752 review).
-        method_return_types = self.factory.type_inference.method_return_types
+        # The C# map (`csharp_method_return_types`, keyed the same way with a
+        # (type, arity) value) is the same defect for a third map (issue
+        # #1753), so both are swept by one filter.
+        type_inference = self.factory.type_inference
+        method_return_types = (
+            type_inference.method_return_types.keys()
+            | type_inference.csharp_method_return_types.keys()
+        )
         owned_natural = {_natural_qn(qn) for qn in owned_qns}
         stale_method_qns = [
             qn
