@@ -91,7 +91,8 @@ def test_cgr_matches_roslyn_oracle_on_nodes(
     for label in ("Class", "Interface", "Enum", "Method", "Function"):
         row = by_label.get(label)
         assert row is not None, (label, by_label)
-        assert row["precision"] == 1.0 and row["recall"] == 1.0, (label, row)
+        assert row["precision"] == 1.0, (label, row)
+        assert row["recall"] == 1.0, (label, row)
 
 
 def test_oracle_agrees_with_cgr_nodes_exactly(
@@ -124,7 +125,8 @@ def test_cgr_matches_roslyn_oracle_on_containment(
     for label in ("DEFINES", "DEFINES_METHOD"):
         row = by_label.get(label)
         assert row is not None, (label, by_label)
-        assert row["precision"] == 1.0 and row["recall"] == 1.0, (label, row)
+        assert row["precision"] == 1.0, (label, row)
+        assert row["recall"] == 1.0, (label, row)
 
 
 def test_cgr_matches_roslyn_oracle_on_inheritance(
@@ -138,7 +140,8 @@ def test_cgr_matches_roslyn_oracle_on_inheritance(
     for label in ("INHERITS", "IMPLEMENTS"):
         row = by_label.get(label)
         assert row is not None, (label, by_label)
-        assert row["precision"] == 1.0 and row["recall"] == 1.0, (label, row)
+        assert row["precision"] == 1.0, (label, row)
+        assert row["recall"] == 1.0, (label, row)
 
 
 def test_oracle_ignores_cgr_ignored_dirs_for_classification(
@@ -209,7 +212,8 @@ def test_same_scope_arity_pair_inherits_grades_clean(tmp_path: Path) -> None:
     by_label = {row["label"]: row for row in result.rows}
     row = by_label.get("INHERITS")
     assert row is not None, by_label
-    assert row["precision"] == 1.0 and row["recall"] == 1.0, row
+    assert row["precision"] == 1.0, row
+    assert row["recall"] == 1.0, row
 
 
 def test_oracle_suppresses_preprocessor_split_phantom_members(
@@ -342,4 +346,5 @@ def test_cgr_matches_roslyn_oracle_on_spans(
     result = score_span(cgr, oracle, ec.CSHARP_SCORED_NODE_KINDS)
     assert result.rows, "no span rows produced"
     for row in result.rows:
-        assert row["precision"] == 1.0 and row["recall"] == 1.0, row
+        assert row["precision"] == 1.0, row
+        assert row["recall"] == 1.0, row

@@ -102,11 +102,8 @@ def test_cgr_matches_tsc_oracle_on_js_containment_edges(tmp_path: Path) -> None:
     ):
         row = by_label.get(label)
         assert row is not None, (label, by_label, result.diff)
-        assert row["precision"] == 1.0 and row["recall"] == 1.0, (
-            label,
-            row,
-            result.diff,
-        )
+        assert row["precision"] == 1.0, (label, row, result.diff)
+        assert row["recall"] == 1.0, (label, row, result.diff)
 
 
 def test_cgr_matches_tsc_oracle_on_prototype_method_containment(
@@ -124,4 +121,5 @@ def test_cgr_matches_tsc_oracle_on_prototype_method_containment(
     by_label = {row["label"]: row for row in result.rows}
     row = by_label.get(cs.RelationshipType.DEFINES.value)
     assert row is not None, (by_label, result.diff)
-    assert row["precision"] == 1.0 and row["recall"] == 1.0, (row, result.diff)
+    assert row["precision"] == 1.0, (row, result.diff)
+    assert row["recall"] == 1.0, (row, result.diff)

@@ -52,4 +52,5 @@ def test_cgr_matches_luaparse_oracle_on_lua_structure(tmp_path: Path) -> None:
     by_label = {row["label"]: row for row in result.rows}
     row = by_label.get(cs.NodeLabel.FUNCTION.value)
     assert row is not None, by_label
-    assert row["precision"] == 1.0 and row["recall"] == 1.0, row
+    assert row["precision"] == 1.0, row
+    assert row["recall"] == 1.0, row

@@ -53,5 +53,6 @@ def test_cgr_matches_luaparse_oracle_on_containment_edges(tmp_path: Path) -> Non
     # Lua only has DEFINES (no methods, so no DEFINES_METHOD row at all).
     row = by_label.get(cs.RelationshipType.DEFINES.value)
     assert row is not None, (by_label, result.diff)
-    assert row["precision"] == 1.0 and row["recall"] == 1.0, (row, result.diff)
+    assert row["precision"] == 1.0, (row, result.diff)
+    assert row["recall"] == 1.0, (row, result.diff)
     assert cs.RelationshipType.DEFINES_METHOD.value not in by_label, by_label
