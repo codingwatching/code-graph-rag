@@ -147,3 +147,37 @@ def test_an_entry_whose_registry_row_is_already_gone_is_still_forgotten(
         f"the orphaned entry outlived its registry row and its file: {recorded}"
     )
     assert recorded.get("proj.pkg.types.B.Twin") == "B", recorded
+
+
+def test_a_qn_shared_with_a_survivor_is_forgotten_rather_than_left_stale(
+    temp_repo: Path,
+) -> None:
+    """Two files declaring the same receiver method share one map slot.
+
+    The map holds one value per qn, and the later-parsed file wrote it. When
+    that file is deleted the survivor is not re-parsed, so keeping the entry
+    keeps the DELETED definition's return type under the survivor's name;
+    forgetting it costs a lookup until the survivor's next parse (#1752
+    review).
+    """
+    root = temp_repo / "proj"
+    (root / "pkg").mkdir(parents=True)
+    (root / "pkg" / "types.go").write_text(TYPES_GO, encoding="utf-8")
+    (root / "pkg" / "methods.go").write_text(METHODS_GO, encoding="utf-8")
+    # Parsed after methods.go, so its return type is the one recorded.
+    (root / "pkg" / "other.go").write_text(
+        "package pkg\n\nfunc (a A) Clone() B { return B{} }\n", encoding="utf-8"
+    )
+    updater = _updater(root)
+    updater.run()
+    recorded = updater.factory.type_inference.method_return_types
+    assert recorded.get("proj.pkg.types.A.Clone") == "B", (
+        f"fixture guard: the later file did not write the shared slot: {recorded}"
+    )
+
+    (root / "pkg" / "other.go").unlink()
+    updater.remove_file_from_state(root / "pkg" / "other.go")
+
+    assert "proj.pkg.types.A.Clone" not in recorded, (
+        f"the deleted definition's return type survives under the survivor: {recorded}"
+    )

@@ -477,6 +477,12 @@ def _touch_empty_json(cache_path: Path) -> None:
         pass
 
 
+def _natural_qn(qualified_name: str) -> str:
+    """`pkg.T.M@3` -> `pkg.T.M`: the duplicate marker lives in the last segment."""
+    head, sep, last = qualified_name.rpartition(cs.SEPARATOR_DOT)
+    return f"{head}{sep}{last.split(cs.DUP_QN_MARKER, 1)[0]}"
+
+
 class GraphUpdater:
     """Drive a full or incremental ingest of a repository into the graph.
 
@@ -2719,16 +2725,26 @@ class GraphUpdater:
         # and no prefix of the declaring file matches it, so its return type
         # outlived both (#1752 review). The prefix arm covers an entry filed
         # under this file's own module; `foreign_qns` protects a qn another
-        # file still owns, exactly as it does for the registry.
+        # file still owns, as it does for the registry, EXCEPT where this
+        # file owns the qn too: the map holds one value per qn, the deleted
+        # definition may be the one that wrote it, and the survivor is not
+        # re-parsed by this event, so the entry goes and the next parse of
+        # the survivor re-records it. A missing type is a degraded answer; a
+        # stale one is a wrong answer (#1752 review).
+        # The map is keyed by the NATURAL qn even when the registry filed the
+        # definition as a `@line` duplicate (the second declaration of one
+        # receiver method writes `...A.Clone`, its span record says
+        # `...A.Clone@3`), so ownership is compared on the natural form.
         method_return_types = self.factory.type_inference.method_return_types
+        owned_natural = {_natural_qn(qn) for qn in owned_qns}
         stale_method_qns = [
             qn
             for qn in method_return_types
-            if qn not in foreign_qns
-            and (
-                qn in qns_to_remove
-                or qn in owned_qns
-                or any(
+            if qn in qns_to_remove
+            or qn in owned_natural
+            or (
+                qn not in foreign_qns
+                and any(
                     qn.startswith(f"{prefix}.") or qn == prefix
                     for prefix in module_qn_prefixes
                 )
