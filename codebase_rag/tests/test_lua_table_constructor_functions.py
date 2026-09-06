@@ -83,7 +83,7 @@ REVIEW_LUA = (
     "local function helper2() end\n"
     "local s = { [k] = function() end, { run = function() end } }\n"
     "local handlers = { { run = function() helper() end }, { run = function() end } }\n"
-    "register({ on_event = function() helper2() end })\n"
+    "local result = register({ on_event = function() helper2() end })\n"
     "local function outer() return { f = function() helper() end } end\n"
     "return { setup = function() helper() end }\n"
 )
@@ -113,13 +113,17 @@ def test_keys_that_name_nothing_fall_back_and_named_fields_keep_their_calls(
     """The three shapes the local review found (#1631 review).
 
     A computed `[k]` key and a positional entry are not fields with a name, so
-    they fall back to the assignment form rather than being misnamed; a table
-    nested in a POSITIONAL entry has no field on the outer list either, so
-    `handlers.run` must not be invented. And a field function with no
-    enclosing assignment at all (a returned table, a table passed as an
-    argument, a table returned from a function) is named by its keys and
-    keeps the CALLS edges of its body, because the call pass names callers
-    through the same helper the definition pass does.
+    their functions are ANONYMOUS: falling back to the assignment form named
+    both after the table (`s`, `s@1`) and conflated unrelated callbacks under
+    one identity (#1750 review). A table nested in a POSITIONAL entry has no
+    field on the outer list either, so `handlers.run` must not be invented.
+    A field function whose table is not itself assigned (a returned table, a
+    table passed as an ARGUMENT, a table returned from a function) is named
+    by its keys alone and keeps the CALLS edges of its body, because the call
+    pass names callers through the same helper the definition pass does. The
+    argument case is pinned with an assignment around it: `result` receives
+    `register`'s return value, not the table, so `result.on_event` would be a
+    false identity (#1750 review).
     """
     root = tmp_path / "proj"
     root.mkdir()
@@ -127,7 +131,18 @@ def test_keys_that_name_nothing_fall_back_and_named_fields_keep_their_calls(
 
     functions = _functions(root)
     assert "proj.mod.s.k" not in functions, functions
-    assert not any(qn.startswith("proj.mod.handlers.") for qn in functions), functions
+    for owner in ("proj.mod.s", "proj.mod.handlers", "proj.mod.result"):
+        assert owner not in functions, (owner, functions)
+        assert not any(
+            qn.startswith((f"{owner}.", f"{owner}{cs.DUP_QN_MARKER}"))
+            for qn in functions
+        ), (owner, functions)
+    anonymous = [
+        qn for qn, name in functions.items() if name.startswith(cs.PREFIX_ANONYMOUS)
+    ]
+    assert len(anonymous) == 4, (
+        f"the two nameless `s` entries and both `handlers` entries are anonymous: {functions}"
+    )
     for qn, name in (
         ("proj.mod.setup", "setup"),
         ("proj.mod.on_event", "on_event"),

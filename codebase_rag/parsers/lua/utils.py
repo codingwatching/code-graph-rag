@@ -157,10 +157,44 @@ def field_function_path(func_node: Node) -> tuple[str, str] | None:
             return None
         parts.insert(0, outer_key)
         table = enclosing.parent
-    if table is not None:
+    # The outermost constructor takes an owner only when it IS the value the
+    # statement assigns: a direct child of the assignment's expression list.
+    # `extract_assigned_name` accepts any descendant of a value, so a table
+    # passed as an ARGUMENT (`local r = register({ f = ... })`) would take
+    # `r`, which receives `register`'s return value and not the table, and
+    # the function would carry a false identity `r.f` (#1750 review).
+    if table is not None and _is_assigned_value(table):
         owner = extract_assigned_name(
             table, accepted_var_types=(cs.TS_DOT_INDEX_EXPRESSION, cs.TS_IDENTIFIER)
         )
         if owner:
             parts.insert(0, owner)
     return cs.SEPARATOR_DOT.join(parts), key
+
+
+def _is_assigned_value(node: Node) -> bool:
+    values = node.parent
+    return (
+        values is not None
+        and values.type == cs.TS_LUA_EXPRESSION_LIST
+        and values.parent is not None
+        and values.parent.type == cs.TS_LUA_ASSIGNMENT_STATEMENT
+    )
+
+
+def is_field_value(func_node: Node) -> bool:
+    """True when `func_node` is the value of a table-constructor field.
+
+    The tri-state the callers need: `field_function_path` says None both for
+    a function that is not a field value and for one whose field has no name
+    (a computed `[k]` key, a positional entry, a nesting under either). Only
+    the first may fall back to the enclosing assignment's name; the second
+    is anonymous, and falling back named `{ [k] = function() end }` after the
+    table it sits in (#1750 review).
+    """
+    field = func_node.parent
+    return (
+        field is not None
+        and field.type == cs.TS_LUA_FIELD
+        and field.child_by_field_name(cs.FIELD_VALUE) == func_node
+    )

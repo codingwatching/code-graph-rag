@@ -1893,17 +1893,22 @@ class CallProcessor:
                 # all, and without this the body's calls were dropped or
                 # credited to the enclosing function (#1631 review).
                 field = lua_utils.field_function_path(func_node)
-                func_name = (
-                    field[0]
-                    if field is not None
-                    else lua_utils.extract_assigned_name(
+                if field is not None:
+                    func_name = field[0]
+                elif lua_utils.is_field_value(func_node):
+                    # A field with no name is anonymous in the definition
+                    # pass too; naming it after the assignment here would
+                    # credit its calls to a node that does not exist
+                    # (#1750 review).
+                    func_name = None
+                else:
+                    func_name = lua_utils.extract_assigned_name(
                         func_node,
                         accepted_var_types=(
                             cs.TS_DOT_INDEX_EXPRESSION,
                             cs.TS_IDENTIFIER,
                         ),
                     )
-                )
             if not func_name:
                 # A nameless JS/TS function expression that a NAMED pass
                 # registered (`exports.f = function`, `x: function`) has a

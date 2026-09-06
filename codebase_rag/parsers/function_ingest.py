@@ -1251,7 +1251,10 @@ class FunctionIngestMixin:
             and func_node.type == cs.TS_LUA_FUNCTION_DEFINITION
         ):
             func_name, display_name = self._extract_lua_field_function_name(func_node)
-            if not func_name:
+            # A field value whose field has no name is anonymous; only a
+            # function that is NOT a field value may take the assignment's
+            # name (#1750 review).
+            if not func_name and not lua_utils.is_field_value(func_node):
                 func_name = self._extract_lua_assignment_function_name(func_node)
 
         is_anonymous = not func_name
