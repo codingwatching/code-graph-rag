@@ -606,11 +606,8 @@ def _python_collect_bound_targets(node: Node, out: set[str]) -> None:
                 if name_node is not None and (name := safe_decode_text(name_node)):
                     out.add(name)
                 continue
-            if child_type == cs.TS_PY_ASSIGNMENT:
-                left = child.child_by_field_name(cs.TS_FIELD_LEFT)
-                if left is not None:
-                    _python_collect_target_identifiers(left, out)
-            elif child_type == cs.TS_PY_FOR_STATEMENT:
+            if child_type in (cs.TS_PY_ASSIGNMENT, cs.TS_PY_FOR_STATEMENT):
+                # Both bind whatever their `left` names.
                 left = child.child_by_field_name(cs.TS_FIELD_LEFT)
                 if left is not None:
                     _python_collect_target_identifiers(left, out)
