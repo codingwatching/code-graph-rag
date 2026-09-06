@@ -709,6 +709,12 @@ def _touch_empty_json(cache_path: Path) -> None:
         pass
 
 
+def _natural_qn(qualified_name: str) -> str:
+    """`pkg.T.M@3` -> `pkg.T.M`: the duplicate marker lives in the last segment."""
+    head, sep, last = qualified_name.rpartition(cs.SEPARATOR_DOT)
+    return f"{head}{sep}{last.split(cs.DUP_QN_MARKER, 1)[0]}"
+
+
 class GraphUpdater:
     """Drive a full or incremental ingest of a repository into the graph.
 
@@ -2954,6 +2960,46 @@ class GraphUpdater:
         ]
         if stale_go_qns:
             self.factory.type_inference.drop_go_return_types(stale_go_qns)
+        # `method_return_types` is the same defect for a different map (issue
+        # #1738): C++, Rust and Dart free functions, every language's methods
+        # and Go receiver methods record their return type under the
+        # definition's qn, and this sweep never reached it. A Go method is
+        # keyed by its RECEIVER's module, so its qn can sit under a prefix this
+        # file does not own. Ownership therefore comes from the SPAN records
+        # (`owned_qns`), not from the registry sweep alone: a receiver method
+        # whose registry row is already gone never enters `qns_to_remove`,
+        # and no prefix of the declaring file matches it, so its return type
+        # outlived both (#1752 review). The prefix arm covers an entry filed
+        # under this file's own module; `foreign_qns` protects a qn another
+        # file still owns, as it does for the registry, EXCEPT where this
+        # file owns the qn too: the map holds one value per qn, the deleted
+        # definition may be the one that wrote it, and the survivor is not
+        # re-parsed by this event, so the entry goes and the next parse of
+        # the survivor re-records it. A missing type is a degraded answer; a
+        # stale one is a wrong answer (#1752 review).
+        # Ownership is compared on the NATURAL qn on both sides: the map is
+        # usually keyed by it even when the registry filed the definition as
+        # a `@line` duplicate (the second declaration of one receiver method
+        # writes `...A.Clone`, its span record says `...A.Clone@3`), and a
+        # few writers (deferred Rust functions, duplicate C++ out-of-class
+        # methods) key the map by the `@line` name itself (#1752 review).
+        method_return_types = self.factory.type_inference.method_return_types
+        owned_natural = {_natural_qn(qn) for qn in owned_qns}
+        stale_method_qns = [
+            qn
+            for qn in method_return_types
+            if qn in qns_to_remove
+            or _natural_qn(qn) in owned_natural
+            or (
+                qn not in foreign_qns
+                and any(
+                    qn.startswith(f"{prefix}.") or qn == prefix
+                    for prefix in module_qn_prefixes
+                )
+            )
+        ]
+        if stale_method_qns:
+            self.factory.type_inference.drop_method_return_types(stale_method_qns)
 
         for simple_name, qn_set in self.simple_name_lookup.items():
             original_count = len(qn_set)
