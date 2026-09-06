@@ -84,6 +84,17 @@ def _php_fold(name: str) -> str:
     return name.translate(_PHP_ASCII_FOLD)
 
 
+def _binds_identifier(target: Node, name: str) -> bool:
+    """Whether an unpacking target names `name` at any depth."""
+    stack = [target]
+    while stack:
+        node = stack.pop()
+        if node.type == cs.TS_PY_IDENTIFIER and safe_decode_text(node) == name:
+            return True
+        stack.extend(node.named_children)
+    return False
+
+
 class CallResolver:
     __slots__ = (
         "_py_rel_to_module",
@@ -569,11 +580,16 @@ class CallResolver:
             if assignment.type != cs.TS_PY_ASSIGNMENT:
                 continue
             left = assignment.child_by_field_name(cs.TS_FIELD_LEFT)
-            if (
-                left is None
-                or left.type != cs.TS_PY_IDENTIFIER
-                or safe_decode_text(left) != name
-            ):
+            if left is None:
+                continue
+            # An unpacking target (`Alias, other = make_pair()`) rebinds the
+            # name to a runtime value just as a plain assignment does, and
+            # it is never an alias (#1759 review).
+            if left.type in cs.PY_UNPACKING_TARGET_TYPES:
+                if _binds_identifier(left, name):
+                    bound = None
+                continue
+            if left.type != cs.TS_PY_IDENTIFIER or safe_decode_text(left) != name:
                 continue
             right = assignment.child_by_field_name(cs.TS_FIELD_RIGHT)
             bound = (

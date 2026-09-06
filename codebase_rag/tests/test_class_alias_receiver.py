@@ -24,7 +24,9 @@ MOD_A = (
     "        def __init__(self, v):\n"
     "            self.v = v\n\n\n"
     "def make():\n"
-    "    return Outer()\n"
+    "    return Outer()\n\n\n"
+    "def make_pair():\n"
+    "    return Outer(), 1\n"
 )
 MOD_B = (
     "from mod_a import Outer, make\n\n"
@@ -109,6 +111,23 @@ def test_an_alias_rebound_to_a_value_no_longer_constructs(tmp_path: Path) -> Non
     (root / "mod_a.py").write_text(MOD_A, encoding="utf-8")
     (root / "mod_b.py").write_text(
         "from mod_a import Outer, make\n\nAlias = Outer\nAlias = make()\n\n\n"
+        "def via_alias():\n    return Alias.Inner(3)\n",
+        encoding="utf-8",
+    )
+
+    by_caller = _instantiates(root)
+    assert "proj.mod_b.via_alias" not in by_caller, by_caller
+
+
+def test_an_alias_rebound_by_unpacking_no_longer_constructs(tmp_path: Path) -> None:
+    # `Alias, other = make_pair()` rebinds `Alias` to a runtime value just as
+    # a plain assignment does (#1759 review).
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / "mod_a.py").write_text(MOD_A, encoding="utf-8")
+    (root / "mod_b.py").write_text(
+        "from mod_a import Outer, make_pair\n\nAlias = Outer\n"
+        "Alias, other = make_pair()\n\n\n"
         "def via_alias():\n    return Alias.Inner(3)\n",
         encoding="utf-8",
     )
